@@ -10,8 +10,8 @@ from tqdm import tqdm
 
 # Import centralized settings (paths, constants)
 from config.settings import (
-    DOWNLOADS_SUBDIR,
-    OUTPUT_SUBDIR,
+    DOWNLOADS_DIR,
+    PROCESSED_DATA_DIR,
     DEFAULT_START_VERSION,
     HELM_VERSIONS,
     HELM_URL_WITH_BENCHMARK_TEMPLATE,
@@ -60,14 +60,9 @@ def log_step(step_name, emoji="🔄"):
     print(f"{Fore.MAGENTA}{emoji} {step_name}{Style.RESET_ALL}")
 
 
-# Configure base directories - point to project root
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DOWNLOADS_DIR = os.path.join(PROJECT_ROOT, DOWNLOADS_SUBDIR)
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, OUTPUT_SUBDIR)
-
 # Create necessary directories
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
 
 def get_json_from_url(url):

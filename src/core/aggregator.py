@@ -7,6 +7,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from config.settings import PROCESSED_DATA_DIR, AGGREGATED_DATA_DIR
 
 REQUIRED_COLUMNS: List[str] = [
     "dataset_name",
@@ -21,24 +22,34 @@ REQUIRED_COLUMNS: List[str] = [
 
 def _batch_iter(items: List[Path], batch_size: int) -> Iterable[List[Path]]:
     for i in range(0, len(items), batch_size):
-        yield items[i : i + batch_size]
+        yield items[i: i + batch_size]
 
 
 def aggregate_to_parquet(
-    input_dir: Path | None = None,
-    output_path: Path | None = None,
-    batch_size: int = 10,
+        benchmark: str,
+        input_dir: Path = PROCESSED_DATA_DIR,
+        output_dir: Path = AGGREGATED_DATA_DIR,
+        batch_size: int = 10,
 ) -> Path:
     """Aggregate many HELM CSVs into a single Parquet file.
 
     - Reads files in batches of `batch_size` to keep memory bounded
     - Keeps only REQUIRED_COLUMNS
     - Normalizes hf_split: 'valid' -> 'validation'
+    
+    Args:
+        benchmark: Benchmark type (e.g., 'classic', 'lite', 'mmlu')
+        input_dir: Directory containing CSV files (default: data/processed/)
+        output_dir: Directory to save parquet file (default: data/aggregated/)
+        batch_size: Number of CSV files to process in each batch
     """
 
-    base_dir = Path(__file__).parent
-    in_dir = input_dir or (base_dir / "converted_data")
-    out_path = output_path or (base_dir / "extracted" / "helm_aggregated.parquet")
+    # Use benchmark-specific input directory
+    in_dir = input_dir / benchmark
+
+    # Create output filename and path
+    filename = f"helm_{benchmark}_aggregated.parquet"
+    out_path = output_dir / filename
 
     in_dir = in_dir.resolve()
     out_path = out_path.resolve()
@@ -93,6 +104,27 @@ def aggregate_to_parquet(
 
 
 if __name__ == "__main__":
-    aggregate_to_parquet()
+    import argparse
 
+    parser = argparse.ArgumentParser(description="Aggregate HELM CSV files into Parquet format")
+    parser.add_argument("--benchmark", required=True, help="Benchmark type (e.g., 'classic', 'lite', 'mmlu')")
+    parser.add_argument("--input-dir",
+                        default=str(PROCESSED_DATA_DIR),
+                        help=f"Input directory containing CSV files (default: {PROCESSED_DATA_DIR})")
+    parser.add_argument("--output-dir",
+                        default=str(AGGREGATED_DATA_DIR),
+                        help=f"Output directory for parquet file (default: {AGGREGATED_DATA_DIR})")
+    parser.add_argument("--batch-size", type=int, default=10, help="Batch size for processing (default: 10)")
 
+    args = parser.parse_args()
+
+    # Convert string paths to Path objects
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+
+    aggregate_to_parquet(
+        benchmark=args.benchmark,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        batch_size=args.batch_size
+    )

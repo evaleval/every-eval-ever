@@ -22,8 +22,8 @@ from src.core.downloader import (
 )
 # Import centralized settings for paths and constants
 from config.settings import (
-    DOWNLOADS_SUBDIR,
-    OUTPUT_SUBDIR,
+    DOWNLOADS_DIR,
+    PROCESSED_DATA_DIR,
     TQDM_BAR_FORMAT,
     PROCESS_POOL_MAX_WORKERS,
     BENCHMARK_CSVS_DIR,
@@ -42,10 +42,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("HELM_Processor")
-
-# Configure base directories
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOWNLOADS_DIR = os.path.join(BASE_DIR, DOWNLOADS_SUBDIR)
 
 # Create necessary directories
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
@@ -358,7 +354,7 @@ if __name__ == "__main__":
     log_step(f"Processing benchmark: {args.benchmark}", "📊")
 
     # Create dynamic output directory
-    output_dir_path = Path(BASE_DIR) / OUTPUT_SUBDIR / args.benchmark
+    output_dir_path = PROCESSED_DATA_DIR / args.benchmark
     os.makedirs(output_dir_path, exist_ok=True)
     log_info(f"Output will be saved to: {output_dir_path}", "📂")
 

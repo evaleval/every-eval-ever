@@ -32,9 +32,10 @@ DATA_DIR: Path = Path(__file__).parent.parent / "data"
 # Directory for storing downloaded benchmark CSVs.
 BENCHMARK_CSVS_DIR: Path = DATA_DIR / "benchmark_lines"
 
-# Subdirectory names for downloads and output
-DOWNLOADS_SUBDIR: str = "data/downloads"
-OUTPUT_SUBDIR: str = "data/processed"
+# Directory paths
+DOWNLOADS_DIR: Path = DATA_DIR / "downloads"
+PROCESSED_DATA_DIR: Path = DATA_DIR / "processed"
+AGGREGATED_DATA_DIR: Path = DATA_DIR / "aggregated"
 
 # --------------------------------------------------------------------------------------
 # HELM download & processing settings
