@@ -43,8 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("HELM_Processor")
 
-# Create necessary directories
-os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+# Create necessary directories (will be created dynamically based on args)
 
 
 def read_tasks_from_csv(csv_file: str, adapter_method: str = None) -> List[str]:
@@ -137,8 +136,8 @@ def cleanup(zip_path: str) -> None:
         log_info(f"Removed ZIP file: {zip_path}", "🗑️")
 
 
-def process_line(line: str, output_dir: str, benchmark: str, keep_temp_files: bool = False,
-                 overwrite: bool = False) -> dict:
+def process_line(line: str, output_dir: str, benchmark: str, downloads_dir: str = None, 
+                 keep_temp_files: bool = False, overwrite: bool = False) -> dict:
     """
     Process a single line from start to finish
     Returns a dictionary with the results
@@ -178,14 +177,17 @@ def process_line(line: str, output_dir: str, benchmark: str, keep_temp_files: bo
     result["status"] = "failed"  # Reset status to failed for processing
 
     try:
+        # Use provided downloads_dir or default to DOWNLOADS_DIR
+        actual_downloads_dir = downloads_dir if downloads_dir is not None else str(DOWNLOADS_DIR)
+        
         # Download the data
         log_step(f"Starting download phase", "🔽")
-        downloaded_files = download_tasks([line], output_dir=DOWNLOADS_DIR, benchmark=benchmark, overwrite=overwrite)
+        downloaded_files = download_tasks([line], output_dir=actual_downloads_dir, benchmark=benchmark, overwrite=overwrite)
         if not downloaded_files:
             log_error(f"No files were downloaded")
             raise ValueError("No files were downloaded")
 
-        saved_dir = os.path.join(DOWNLOADS_DIR, line)
+        saved_dir = os.path.join(actual_downloads_dir, line)
 
         # Convert the data
         log_step(f"Starting conversion phase", "🔄")
@@ -225,8 +227,9 @@ def process_line(line: str, output_dir: str, benchmark: str, keep_temp_files: bo
     return result
 
 
-def main(csv_file: str, output_dir: Path, benchmark: str, adapter_method: str = None, keep_temp_files: bool = False,
-         overwrite: bool = False, max_workers: int = PROCESS_POOL_MAX_WORKERS):
+def main(csv_file: str, output_dir: Path, benchmark: str, adapter_method: str = None, 
+         downloads_dir: str = None, keep_temp_files: bool = False, overwrite: bool = False, 
+         max_workers: int = PROCESS_POOL_MAX_WORKERS):
     """
     Main function to process all lines
     """
@@ -257,7 +260,7 @@ def main(csv_file: str, output_dir: Path, benchmark: str, adapter_method: str = 
         # Parallel execution with a fixed-size process pool
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_line = {
-                executor.submit(process_line, line, output_dir, benchmark, keep_temp_files, overwrite): line for line in
+                executor.submit(process_line, line, output_dir, benchmark, downloads_dir, keep_temp_files, overwrite): line for line in
                 lines}
 
             for future in as_completed(future_to_line):
@@ -345,11 +348,18 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
     parser.add_argument("--max-workers", type=int, default=PROCESS_POOL_MAX_WORKERS,
                         help=f"Maximum number of parallel processes (default: {PROCESS_POOL_MAX_WORKERS})")
+    parser.add_argument("--downloads-dir", type=str, default=str(DOWNLOADS_DIR),
+                        help=f"Directory for storing downloaded files (default: {DOWNLOADS_DIR})")
 
     args = parser.parse_args()
 
     log_info(f"Starting HELM Data Processor", "🚀")
     log_info(f"Arguments: {args}", "🔧")
+
+    # Create downloads directory
+    downloads_dir = Path(args.downloads_dir)
+    os.makedirs(downloads_dir, exist_ok=True)
+    log_info(f"Downloads will be saved to: {downloads_dir}", "📥")
 
     log_step(f"Processing benchmark: {args.benchmark}", "📊")
 
@@ -379,7 +389,7 @@ if __name__ == "__main__":
 
     log_step(f"Processing from CSV file: {csv_to_process_str}", "📋")
     main(csv_file=csv_to_process_str, output_dir=output_dir_path, benchmark=args.benchmark,
-         adapter_method=args.adapter_method,
+         adapter_method=args.adapter_method, downloads_dir=args.downloads_dir,
          keep_temp_files=args.keep_temp, overwrite=args.overwrite, max_workers=args.max_workers)
 
     log_success(f"HELM Data Processor completed", "🏁")

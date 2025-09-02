@@ -58,6 +58,14 @@ def get_evaluation_metrics() -> List[Tuple[str, Dict]]:
             "method_name": "meteor_match",
             "description": "Calculates the METEOR score between the predicted and correct answers."
         }),
+        ('edit_similarity', {
+            "method_name": "edit_similarity",
+            "description": "Calculates the edit similarity score between the predicted and correct answers."
+        }),
+        ('toxic_frac', {
+            "method_name": "toxic_frac",
+            "description": "Measures the fraction of toxic content in the response (lower is better)."
+        }),
     ]
 
 
@@ -81,9 +89,14 @@ def select_evaluation_score(stats: Dict) -> Tuple[str, float]:
         if value is not None:
             return method["method_name"], value
 
+    # Collect available fields and their values for debugging
+    available_fields = {key: value for key, value in stats.items() if value is not None}
+    available_info = ", ".join([f"{key}: {value}" for key, value in available_fields.items()])
+
     raise ValueError(
-        "No supported evaluation metric found in prediction stats. "
-        "Expected one of: exact_match, quasi_exact_match, final_number_exact_match, math_equiv_chain_of_thought."
+        f"No supported evaluation metric found in prediction stats. "
+        f"Expected one of: exact_match, quasi_exact_match, final_number_exact_match, math_equiv_chain_of_thought, edit_similarity, toxic_frac. "
+        f"Available fields: {available_info}"
     )
 
 
