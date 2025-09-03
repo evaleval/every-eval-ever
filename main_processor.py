@@ -14,10 +14,9 @@ import pandas as pd
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from src.core.web_scraper import main as create_csv_main
 from src.core.converter import main as convert_main
-# Import functions from helm_downloader.py
-from src.core.downloader import (
+# Import functions from helm/downloader.py
+from src.core.helm.downloader import (
     download_tasks, log_info, log_success, log_error, log_warning, log_step
 )
 # Import centralized settings for paths and constants
@@ -377,6 +376,8 @@ if __name__ == "__main__":
         else:
             log_info(f"Overwrite flag is set. Re-downloading CSV for benchmark '{args.benchmark}'.", "📥")
         try:
+            # Import web_scraper lazily to avoid requiring Playwright at module import time
+            from src.core.helm.web_scraper import main as create_csv_main
             asyncio.run(create_csv_main(benchmark=args.benchmark, output_dir=str(BENCHMARK_CSVS_DIR)))
             log_success(f"Successfully created CSV: {csv_to_process}", "✅")
         except Exception as e:
