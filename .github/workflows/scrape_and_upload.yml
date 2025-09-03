@@ -10,10 +10,7 @@ jobs:
   scrape_and_upload:
     name: Scrape HELM and upload to Hugging Face Dataset
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    env:
-      # HF token must be provided in repository secrets as HF_TOKEN
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  timeout-minutes: 360
 
     steps:
       - name: Checkout repository

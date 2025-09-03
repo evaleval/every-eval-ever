@@ -214,3 +214,17 @@ This project follows a clean, modular structure:
 
 This organization makes the project easy to understand, maintain, and extend.
 
+
+## Continuous Integration / Scheduled Scrape
+
+This repository includes a GitHub Actions workflow that runs once a week to:
+
+- Scrape HELM for all benchmarks/datasets/splits
+- Download and process raw HELM files
+- Aggregate processed CSVs into Parquet
+- Upload resulting Parquet files to the Hugging Face dataset `evaleval/every_eval_ever`
+
+To enable the workflow, add a repository secret named `HF_TOKEN` containing a Hugging Face token with write access to the dataset. The workflow will install dependencies (including Playwright and browsers), run the full pipeline, and upload the output files to the dataset repo.
+
+If you want to manually trigger a run from the Actions page, use the workflow named "Weekly HELM scrape and upload".
+
