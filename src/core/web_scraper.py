@@ -1,11 +1,24 @@
 import argparse
 import asyncio
 import os
+import logging
+import sys
 
 import pandas as pd
 from playwright.async_api import async_playwright
 
 from config.settings import BENCHMARK_CSVS_DIR
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('web_scraper.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 async def scrape_helm_data(benchmark: str):
@@ -13,9 +26,11 @@ async def scrape_helm_data(benchmark: str):
     Scrape HELM data using direct URL navigation with proper page refresh
     to prevent caching issues.
     """
+    logger.info(f"🌐 Starting web scrape for HELM benchmark: {benchmark}")
     all_data = []
 
     async with async_playwright() as playwright:
+        logger.info("🔧 Launching Chromium browser...")
         browser = await playwright.chromium.launch(headless=True)
         context = await browser.new_context(
             # Disable cache to ensure we get fresh data

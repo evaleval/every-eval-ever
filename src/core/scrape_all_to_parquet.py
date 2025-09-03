@@ -8,7 +8,7 @@ Usage (from repo root):
 
 This script re-uses existing modules in the repository:
 - src.core.web_scraper (to create benchmark CSVs)
-- main_processor.main (to download+convert tasks listed in CSVs)
+- main.py (unified entry point to download+convert tasks listed in CSVs)
 
 Notes:
 - Network access required to scrape and download HELM assets.
@@ -22,6 +22,8 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
+import logging
+import sys
 from pathlib import Path
 from typing import List
 
@@ -38,8 +40,18 @@ from config.settings import (
 
 # Reuse existing entry points
 import subprocess
-import sys
 from shutil import which
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('scraper.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 # Default benchmark candidates (these are common examples in the README)
@@ -53,55 +65,82 @@ def discover_benchmarks() -> List[str]:
     - Look for existing CSVs in BENCHMARK_CSVS_DIR (files named helm_{benchmark}.csv)
     - Merge with DEFAULT_BENCHMARKS
     """
+    logger.info("Discovering benchmarks to process...")
+    
     BENCHMARK_CSVS_DIR.mkdir(parents=True, exist_ok=True)
     discovered = set()
-    for p in BENCHMARK_CSVS_DIR.glob("helm_*.csv"):
+    
+    existing_files = list(BENCHMARK_CSVS_DIR.glob("helm_*.csv"))
+    logger.info(f"Found {len(existing_files)} existing benchmark CSV files in {BENCHMARK_CSVS_DIR}")
+    
+    for p in existing_files:
         name = p.stem.replace("helm_", "")
         if name:
             discovered.add(name)
+            logger.info(f"Discovered existing benchmark: {name}")
 
     discovered.update(DEFAULT_BENCHMARKS)
-    return sorted(discovered)
+    logger.info(f"Default benchmarks: {DEFAULT_BENCHMARKS}")
+    
+    result = sorted(discovered)
+    logger.info(f"Total benchmarks to process: {result}")
+    return result
 
 
 def ensure_csv_for_benchmark(benchmark: str) -> Path:
     """Ensure a `helm_{benchmark}.csv` exists; create it by scraping if missing.
-
+    
     Returns the path to the CSV file.
     """
     csv_path = BENCHMARK_CSVS_DIR / f"helm_{benchmark}.csv"
-    if not csv_path.exists():
-        print(f"CSV for benchmark '{benchmark}' not found, scraping HELM website (external process)...")
-        python_exec = sys.executable
-        # Try to run the web_scraper module as a script: python -m src.core.web_scraper
-        cmd = [python_exec, "-m", "src.core.web_scraper", "--benchmark", benchmark, "--output-dir", str(BENCHMARK_CSVS_DIR)]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            print(f"Failed to run web_scraper. Return code: {res.returncode}\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}")
-            raise RuntimeError(f"web_scraper failed for benchmark '{benchmark}'")
-        if not csv_path.exists():
-            raise FileNotFoundError(f"Scraper finished but CSV not created for '{benchmark}'")
-        print(f"Created CSV: {csv_path}")
-    else:
-        print(f"Found existing CSV: {csv_path}")
+    
+    if csv_path.exists():
+        logger.info(f"CSV already exists for benchmark '{benchmark}': {csv_path}")
+        return csv_path
+    
+    logger.info(f"CSV missing for benchmark '{benchmark}', starting web scraping...")
+    
+    # Import scraper here to avoid import-time side effects
+    from .web_scraper import scrape_benchmark_to_csv
+    
+    logger.info(f"Scraping HELM website for benchmark: {benchmark}")
+    try:
+        scrape_benchmark_to_csv(benchmark, csv_path)
+        logger.info(f"✓ Successfully scraped benchmark '{benchmark}' to {csv_path}")
+        
+        # Log some stats about the scraped data
+        if csv_path.exists():
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            logger.info(f"  Scraped {len(df)} tasks for benchmark '{benchmark}'")
+        
+    except Exception as e:
+        logger.error(f"✗ Failed to scrape benchmark '{benchmark}': {e}")
+        raise
+    
     return csv_path
 
 
 def process_benchmark_csv(csv_path: Path, benchmark: str, downloads_dir: Path | None = None,
                           keep_temp: bool = False, overwrite: bool = False, max_workers: int = 8):
-    """Call the project's `main_processor.main` to download & convert all tasks in a CSV.
+    """Call the project's unified `main.py` to download & convert all tasks in a CSV.
 
-    `main_processor.main` expects: csv_file (str), output_dir (Path), benchmark (str), ...
+    The main.py expects: --source, --benchmark, --downloads-dir, etc.
     We reuse it to avoid duplicating download/convert logic.
     """
+    logger.info(f"Starting to process benchmark CSV: {csv_path}")
+    
     output_dir = PROCESSED_DATA_DIR / benchmark
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Output directory: {output_dir}")
 
-    # Run the main_processor.py script as a subprocess to avoid import-time side-effects
+    # Run the processor script as a subprocess to avoid import-time side-effects
     python_exec = sys.executable
     cmd = [
         python_exec,
-        str(Path.cwd() / "main_processor.py"),
+        str(Path.cwd() / "main.py"),
+        "--source",
+        "helm",
         "--benchmark",
         benchmark,
         "--downloads-dir",
@@ -114,12 +153,36 @@ def process_benchmark_csv(csv_path: Path, benchmark: str, downloads_dir: Path | 
     if max_workers:
         cmd.extend(["--max-workers", str(max_workers)])
 
-    print(f"Running processor for benchmark '{benchmark}' via: {' '.join(cmd)}")
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"Processor failed for benchmark '{benchmark}' (rc={res.returncode})\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}")
-        raise RuntimeError(f"Processor failed for benchmark '{benchmark}'")
-    print(f"Processor completed for benchmark '{benchmark}'")
+    logger.info(f"Running processor command: {' '.join(cmd)}")
+    
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if res.returncode != 0:
+            logger.error(f"✗ Processor failed for benchmark '{benchmark}' (exit code {res.returncode})")
+            logger.error(f"STDOUT: {res.stdout}")
+            logger.error(f"STDERR: {res.stderr}")
+            raise RuntimeError(f"Processor failed for benchmark '{benchmark}'")
+        
+        logger.info(f"✓ Processor completed successfully for benchmark '{benchmark}'")
+        
+        # Log some stats about what was processed
+        if output_dir.exists():
+            csv_files = list(output_dir.glob("*.csv"))
+            logger.info(f"  Generated {len(csv_files)} processed CSV files")
+            
+            total_rows = 0
+            for csv_file in csv_files:
+                try:
+                    df = pd.read_csv(csv_file)
+                    total_rows += len(df)
+                except:
+                    pass
+            logger.info(f"  Total processed rows: {total_rows}")
+        
+    except Exception as e:
+        logger.error(f"✗ Error running processor for benchmark '{benchmark}': {e}")
+        raise
 
 
 def _build_pyarrow_schema() -> pa.Schema:
@@ -165,18 +228,31 @@ def aggregate_benchmark_to_parquet(output_parquet: Path, benchmark: str, input_d
     - Ensures the resulting parquet conforms to `schema` (adds missing columns as null)
     - Writes a single file at `output_parquet`
     """
+    logger.info(f"Starting aggregation of benchmark '{benchmark}' to parquet: {output_parquet}")
+    
     if schema is None:
         schema = _build_pyarrow_schema()
+    
+    logger.info(f"Using schema with {len(schema)} fields")
 
     # Only look for CSVs in the specific benchmark directory
     benchmark_dir = input_dir / benchmark
+    logger.info(f"Looking for CSV files in: {benchmark_dir}")
+    
     csv_paths = sorted([p for p in benchmark_dir.rglob("*.csv") if p.is_file()])
+    logger.info(f"Found {len(csv_paths)} CSV files to aggregate")
+    
     if not csv_paths:
-        raise FileNotFoundError(f"No processed CSV files found for benchmark '{benchmark}' under {benchmark_dir}")
+        error_msg = f"No processed CSV files found for benchmark '{benchmark}' under {benchmark_dir}"
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
 
     out_dir = output_parquet.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Output directory: {out_dir}")
+    
     if output_parquet.exists():
+        logger.info(f"Removing existing parquet file: {output_parquet}")
         output_parquet.unlink()
 
     writer: pq.ParquetWriter | None = None
@@ -184,12 +260,16 @@ def aggregate_benchmark_to_parquet(output_parquet: Path, benchmark: str, input_d
 
     for i in range(0, len(csv_paths), batch_size):
         batch = csv_paths[i: i + batch_size]
+        logger.info(f"Processing batch {i//batch_size + 1}/{(len(csv_paths) + batch_size - 1)//batch_size} ({len(batch)} files)")
         frames = []
+        
         for csv_p in batch:
             try:
+                logger.info(f"  Reading CSV: {csv_p.name}")
                 df = pd.read_csv(csv_p)
+                logger.info(f"    Loaded {len(df)} rows")
             except Exception as e:
-                print(f"[skip] Failed reading {csv_p}: {e}")
+                logger.warning(f"  [skip] Failed reading {csv_p}: {e}")
                 continue
 
             # Record provenance
@@ -243,14 +323,17 @@ def aggregate_benchmark_to_parquet(output_parquet: Path, benchmark: str, input_d
             )
         writer.write_table(table)
         total_rows += table.num_rows
-        print(f"Wrote batch of {table.num_rows:,} rows (total {total_rows:,})")
+        logger.info(f"✓ Wrote batch of {table.num_rows:,} rows (total so far: {total_rows:,})")
 
     if writer is not None:
         writer.close()
+        logger.info(f"✓ Parquet writer closed. Final output: {output_parquet}")
     else:
-        raise RuntimeError(f"No data written to parquet for benchmark '{benchmark}'. Check processed CSV files.")
+        error_msg = f"No data written to parquet for benchmark '{benchmark}'. Check processed CSV files."
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
 
-    print(f"Done. Aggregated {total_rows:,} rows from benchmark '{benchmark}' -> {output_parquet}")
+    logger.info(f"🎉 Successfully aggregated {total_rows:,} rows from benchmark '{benchmark}' -> {output_parquet}")
     return output_parquet
 
 
@@ -367,22 +450,34 @@ def main(output: str, benchmarks: List[str] | None = None, downloads_dir: str | 
     benchmarks_to_run = benchmarks if benchmarks else discover_benchmarks()
     print(f"Benchmarks to process: {benchmarks_to_run}")
 
-    for b in benchmarks_to_run:
+    logger.info(f"🚀 Starting processing for {len(benchmarks_to_run)} benchmarks: {benchmarks_to_run}")
+
+    for i, b in enumerate(benchmarks_to_run, 1):
         try:
+            logger.info(f"\n=== Processing benchmark {i}/{len(benchmarks_to_run)}: '{b}' ===")
             csv_path = ensure_csv_for_benchmark(b)
-            print(f"Processing benchmark '{b}' (CSV: {csv_path})")
+            logger.info(f"Using CSV: {csv_path}")
+            
             process_benchmark_csv(csv_path, b, downloads_dir=downloads_path,
                                   keep_temp=keep_temp, overwrite=overwrite, max_workers=max_workers)
+            logger.info(f"✓ Benchmark '{b}' processed successfully")
+            
         except Exception as e:
-            print(f"[error] Benchmark '{b}' failed: {e}")
+            logger.error(f"✗ Benchmark '{b}' failed: {e}")
+            raise
 
     # Aggregate based on the number of benchmarks
+    logger.info(f"\n=== Starting aggregation to parquet ===")
     if len(benchmarks_to_run) == 1:
         # Single benchmark - use benchmark-specific aggregation
+        logger.info(f"Single benchmark mode - aggregating '{benchmarks_to_run[0]}' only")
         aggregate_benchmark_to_parquet(output_path, benchmarks_to_run[0])
     else:
         # Multiple benchmarks - use the original aggregation that combines all
+        logger.info(f"Multi-benchmark mode - aggregating all {len(benchmarks_to_run)} benchmarks")
         aggregate_all_processed_to_parquet(output_path)
+    
+    logger.info(f"🎉 All processing completed! Final parquet: {output_path}")
 
 
 if __name__ == "__main__":
