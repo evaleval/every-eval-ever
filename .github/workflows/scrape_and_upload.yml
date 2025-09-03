@@ -10,7 +10,7 @@ jobs:
   scrape_and_upload:
     name: Scrape HELM and upload to Hugging Face Dataset
     runs-on: ubuntu-latest
-  timeout-minutes: 360
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repository
@@ -29,9 +29,88 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # Ensure we have Playwright and the HF client available
-          pip install playwright huggingface_hub
+          name: Weekly HELM scrape and upload
+
+          on:
+            schedule:
+              # Weekly: Monday 03:00 UTC
+              - cron: '0 3 * * 1'
+            workflow_dispatch: {}
+
+          jobs:
+            scrape_and_upload:
+              name: Scrape HELM and upload to Hugging Face Dataset
+              runs-on: ubuntu-latest
+              timeout-minutes: 360
+
+              steps:
+                - name: Checkout repository
+                  uses: actions/checkout@v4
+
+                - name: Setup Python
+                  uses: actions/setup-python@v4
+                  with:
+                    python-version: '3.11'
+
+                - name: Install system packages required by Playwright
+                  run: |
+                    sudo apt-get update
+                    sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxshmfence0 libgtk-3-0
+
+                - name: Install Python dependencies
+                  run: |
+                    python -m pip install --upgrade pip
+                    pip install -r requirements.txt
+                    # Ensure we have Playwright and the HF client available
+                    pip install playwright huggingface_hub
+                    # Install browsers for Playwright (non-interactive, includes deps)
+                    python -m playwright install --with-deps
+
+                - name: Run full scrape + processing + aggregate
+                  run: |
+                    # Aggregate output filename (will be uploaded)
+                    mkdir -p data/aggregated
+                    python -m src.core.scrape_all_to_parquet --output data/aggregated/full_output.parquet --overwrite --max-workers 4
+
+              - name: Upload Parquet files to Hugging Face dataset repo
+              run: |
+                # Export secret safely into the environment for the step
+                echo "HF_TOKEN=${{ secrets.HF_TOKEN }}" >> $GITHUB_ENV
+                python - <<'PY'
+                import os
+                from pathlib import Path
+                from huggingface_hub import HfApi
+
+                token = os.environ.get('HF_TOKEN')
+                if not token:
+                  raise SystemExit('HF_TOKEN not set in environment (provide via repo secrets)')
+
+                repo_id = 'evaleval/every_eval_ever'
+                api = HfApi()
+
+                # Ensure dataset repo exists (create if missing)
+                try:
+                  api.create_repo(repo_id=repo_id, repo_type='dataset', token=token)
+                  print('Created dataset repo:', repo_id)
+                except Exception as e:
+                  print('Repo create check:', e)
+
+                out_dir = Path('data/aggregated')
+                files = sorted(out_dir.glob('*.parquet'))
+                if not files:
+                  raise SystemExit('No parquet files found to upload')
+
+                for f in files:
+                  print('Uploading', f)
+                  api.upload_file(
+                    path_or_fileobj=str(f),
+                    path_in_repo=f.name,
+                    repo_id=repo_id,
+                    repo_type='dataset',
+                    token=token,
+                  )
+                print('Upload complete')
+                PY
           # Install browsers for Playwright (non-interactive, includes deps)
           python -m playwright install --with-deps
 
