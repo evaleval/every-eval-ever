@@ -157,6 +157,103 @@ def _build_pyarrow_schema() -> pa.Schema:
     ])
 
 
+def aggregate_benchmark_to_parquet(output_parquet: Path, benchmark: str, input_dir: Path = PROCESSED_DATA_DIR,
+                                  schema: pa.Schema | None = None, batch_size: int = 20):
+    """Aggregate CSV files for a specific benchmark into a single Parquet file.
+
+    - Only processes CSVs under `input_dir/{benchmark}/*.csv`
+    - Ensures the resulting parquet conforms to `schema` (adds missing columns as null)
+    - Writes a single file at `output_parquet`
+    """
+    if schema is None:
+        schema = _build_pyarrow_schema()
+
+    # Only look for CSVs in the specific benchmark directory
+    benchmark_dir = input_dir / benchmark
+    csv_paths = sorted([p for p in benchmark_dir.rglob("*.csv") if p.is_file()])
+    if not csv_paths:
+        raise FileNotFoundError(f"No processed CSV files found for benchmark '{benchmark}' under {benchmark_dir}")
+
+    out_dir = output_parquet.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if output_parquet.exists():
+        output_parquet.unlink()
+
+    writer: pq.ParquetWriter | None = None
+    total_rows = 0
+
+    for i in range(0, len(csv_paths), batch_size):
+        batch = csv_paths[i: i + batch_size]
+        frames = []
+        for csv_p in batch:
+            try:
+                df = pd.read_csv(csv_p)
+            except Exception as e:
+                print(f"[skip] Failed reading {csv_p}: {e}")
+                continue
+
+            # Record provenance
+            df["source_csv"] = str(csv_p.name)
+            # Use the benchmark parameter instead of inferring from parent folder
+            df["source_benchmark"] = benchmark
+
+            # Set a generic `source` field so this Parquet can include non-HELM data in future.
+            # Current processed CSVs are produced by the HELM pipeline, so mark as 'helm'.
+            df["source"] = "helm"
+
+            # source_version is not always known; leave null for now
+            df["source_version"] = pd.NA
+            df["source_url"] = pd.NA
+            # ingestion timestamp (UTC)
+            df["ingestion_timestamp"] = pd.Timestamp(datetime.now(timezone.utc))
+            df["license"] = pd.NA
+            # category is reserved for one of 20 risk/capability categories — leave blank for now
+            df["category"] = pd.NA
+
+            # Ensure columns in schema exist (use schema names list)
+            for name in schema.names:
+                if name not in df.columns:
+                    df[name] = pd.NA
+
+            # Reorder columns to schema order
+            df = df[[name for name in schema.names]]
+
+            frames.append(df)
+
+        if not frames:
+            continue
+
+        batch_df = pd.concat(frames, ignore_index=True)
+
+        # Cast to pyarrow table using provided schema (preserve nullability)
+        table = pa.Table.from_pandas(batch_df, schema=schema, preserve_index=False)
+
+        if writer is None:
+            # Use HuggingFace-optimized parquet settings
+            # - SNAPPY compression for good balance of speed/size
+            # - Row group size of 100k rows (HF recommendation)
+            # - Write statistics for better querying performance
+            writer = pq.ParquetWriter(
+                output_parquet, 
+                table.schema,
+                compression='snappy',
+                use_dictionary=True,
+                write_statistics=True,
+                row_group_size=100000  # 100k rows per row group (HF recommendation)
+            )
+        writer.write_table(table)
+        total_rows += table.num_rows
+        print(f"Wrote batch of {table.num_rows:,} rows (total {total_rows:,})")
+
+    if writer is not None:
+        writer.close()
+    else:
+        raise RuntimeError(f"No data written to parquet for benchmark '{benchmark}'. Check processed CSV files.")
+
+    print(f"Done. Aggregated {total_rows:,} rows from benchmark '{benchmark}' -> {output_parquet}")
+    return output_parquet
+
+
 def aggregate_all_processed_to_parquet(output_parquet: Path, input_dir: Path = PROCESSED_DATA_DIR,
                                       schema: pa.Schema | None = None, batch_size: int = 20):
     """Aggregate all CSV files under `input_dir/*/*.csv` into a single Parquet file.
@@ -226,7 +323,18 @@ def aggregate_all_processed_to_parquet(output_parquet: Path, input_dir: Path = P
         table = pa.Table.from_pandas(batch_df, schema=schema, preserve_index=False)
 
         if writer is None:
-            writer = pq.ParquetWriter(output_parquet, table.schema)
+            # Use HuggingFace-optimized parquet settings
+            # - SNAPPY compression for good balance of speed/size
+            # - Row group size of 100k rows (HF recommendation)
+            # - Write statistics for better querying performance
+            writer = pq.ParquetWriter(
+                output_parquet, 
+                table.schema,
+                compression='snappy',
+                use_dictionary=True,
+                write_statistics=True,
+                row_group_size=100000  # 100k rows per row group (HF recommendation)
+            )
         writer.write_table(table)
         total_rows += table.num_rows
         print(f"Wrote batch of {table.num_rows:,} rows (total {total_rows:,})")
@@ -248,7 +356,10 @@ def main(output: str, benchmarks: List[str] | None = None, downloads_dir: str | 
     1. Discover benchmarks
     2. Ensure CSVs exist (scrape if necessary)
     3. For each benchmark: download+convert all tasks to processed CSVs
-    4. Aggregate all processed CSVs into a single Parquet file with schema
+    4. Aggregate processed CSVs into a Parquet file with schema
+    
+    If multiple benchmarks are specified, they will be aggregated together.
+    If a single benchmark is specified, only that benchmark's data will be aggregated.
     """
     output_path = Path(output)
     downloads_path = Path(downloads_dir) if downloads_dir else None
@@ -265,8 +376,13 @@ def main(output: str, benchmarks: List[str] | None = None, downloads_dir: str | 
         except Exception as e:
             print(f"[error] Benchmark '{b}' failed: {e}")
 
-    # Aggregate
-    aggregate_all_processed_to_parquet(output_path)
+    # Aggregate based on the number of benchmarks
+    if len(benchmarks_to_run) == 1:
+        # Single benchmark - use benchmark-specific aggregation
+        aggregate_benchmark_to_parquet(output_path, benchmarks_to_run[0])
+    else:
+        # Multiple benchmarks - use the original aggregation that combines all
+        aggregate_all_processed_to_parquet(output_path)
 
 
 if __name__ == "__main__":
