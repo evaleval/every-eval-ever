@@ -7,8 +7,47 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  validate_env:
+    name: Validate environment (quick test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install minimal system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxshmfence1 libgtk-3-0 || true
+
+      - name: Install Python dependencies (quick)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install playwright huggingface_hub
+
+      - name: Quick import check
+        run: |
+          python - <<'PY'
+          try:
+              import sys
+              import pandas
+              import pyarrow
+              import playwright
+              import huggingface_hub
+              print('import check OK')
+          except Exception as e:
+              print('Import check failed:', e)
+              raise
+          PY
+
   scrape_and_upload:
     name: Scrape HELM and upload to Hugging Face Dataset
+    needs: validate_env
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -24,7 +63,7 @@ jobs:
       - name: Install system packages required by Playwright
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxshmfence0 libgtk-3-0
+          sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxshmfence1 libgtk-3-0
 
       - name: Install Python dependencies
         run: |
