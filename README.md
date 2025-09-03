@@ -164,8 +164,10 @@ The repository includes automated weekly processing:
 
 ```yaml
 # .github/workflows/scrape_and_upload.yml
+- Name: "Weekly Evaluation Data Processing"
 - Schedule: Mondays at 03:00 UTC
-- Processes: All supported benchmarks
+- Current: HELM (lite, mmlu, classic benchmarks)
+- Future: Multi-source parallel processing
 - Output: Incremental Parquet shards
 - Upload: Direct to HuggingFace Hub
 ```
@@ -326,7 +328,7 @@ Update GitHub Actions workflow to include your source:
 
 ```yaml
 # In .github/workflows/scrape_and_upload.yml
-- name: Run incremental scrape and upload
+- name: Process evaluation data and upload to HuggingFace
   run: |
     python scripts/incremental_upload.py \
       --repo-id evaleval/every_eval_ever \
