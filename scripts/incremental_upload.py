@@ -99,21 +99,20 @@ def process_benchmark(benchmark: str, part_num: int, source_name: str,
     
     logger.info(f"📁 Output file: {shard_name}")
     
-    # Run scraper for this specific benchmark
-    cmd = [
+    # Step 1: Run HELM processor to generate CSV files
+    helm_cmd = [
         sys.executable, "main.py", source_name,
-        "--output", str(output_path),
         "--benchmark", benchmark,
         "--overwrite",
         "--max-workers", str(max_workers)
     ]
     
-    logger.info(f"🚀 Starting scraper: {' '.join(cmd)}")
+    logger.info(f"🚀 Step 1 - Processing HELM data: {' '.join(helm_cmd)}")
     
     try:
         # Use Popen for real-time output
         process = subprocess.Popen(
-            cmd,
+            helm_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -123,12 +122,50 @@ def process_benchmark(benchmark: str, part_num: int, source_name: str,
         
         # Stream output in real-time
         for line in process.stdout:
-            logger.info(f"   {line.rstrip()}")
+            logger.info(f"   [HELM] {line.rstrip()}")
         
         process.wait(timeout=timeout)
         
         if process.returncode != 0:
-            raise subprocess.CalledProcessError(process.returncode, cmd)
+            raise subprocess.CalledProcessError(process.returncode, helm_cmd)
+        
+        logger.info(f"✅ HELM processing completed for {benchmark}")
+        
+        # Step 2: Run aggregator to create parquet file
+        agg_cmd = [
+            sys.executable, "-m", "src.core.aggregator",
+            "--benchmark", benchmark,
+            "--output-dir", str(output_path.parent)
+        ]
+        
+        logger.info(f"🔄 Step 2 - Aggregating to parquet: {' '.join(agg_cmd)}")
+        
+        agg_process = subprocess.Popen(
+            agg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # Stream aggregator output
+        for line in agg_process.stdout:
+            logger.info(f"   [AGG] {line.rstrip()}")
+        
+        agg_process.wait(timeout=timeout)
+        
+        if agg_process.returncode != 0:
+            raise subprocess.CalledProcessError(agg_process.returncode, agg_cmd)
+        
+        # The aggregator creates helm_{benchmark}_aggregated.parquet
+        # We need to rename it to our desired format
+        aggregated_file = output_path.parent / f"helm_{benchmark}_aggregated.parquet"
+        if aggregated_file.exists():
+            aggregated_file.rename(output_path)
+            logger.info(f"✅ Renamed {aggregated_file.name} to {output_path.name}")
+        else:
+            raise FileNotFoundError(f"Expected aggregated file not found: {aggregated_file}")
         
         logger.info(f"✅ Successfully processed {benchmark}")
         return output_path
