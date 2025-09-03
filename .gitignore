@@ -1,5 +1,7 @@
 /data/
 /helm_processor.log
+*.csv
+*.parquet
 
 # Byte-compiled / cache
 __pycache__/
