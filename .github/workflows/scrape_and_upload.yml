@@ -35,24 +35,22 @@ jobs:
           echo "🖥️  Runner: ${{ runner.os }}"
           echo "🐍 Python version: $(python --version)"
           echo "💾 Available memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
-          echo "⚡ Processing with optimized chunked parallel uploads for maximum performance"
+          echo "⚡ Processing with optimized sequential chunk processing for stability"
           
           echo ""
-          echo "🚀 AGGRESSIVE PARALLEL PROCESSING MODE"
+          echo "🚀 BALANCED PARALLEL PROCESSING MODE"
           echo "📦 Processing ALL benchmarks simultaneously"
-          echo "⚡ Each benchmark: 8 workers, 100 tasks/chunk, 6 upload workers"
-          echo "🔥 Target: Complete entire dataset in under 60 minutes"
+          echo "⚡ Each benchmark: 8 workers, 100 tasks/chunk, sequential uploads"
+          echo "🎯 Target: Reliable processing with reduced resource contention"
           
           pids=()
           for benchmark in lite mmlu classic; do
-            echo "🔄 Starting parallel processing for benchmark: $benchmark"
+            echo "🔄 Starting sequential chunk processing for benchmark: $benchmark"
             (
               python scripts/optimized_helm_processor.py \
                 --benchmark "$benchmark" \
                 --max-workers 8 \
                 --chunk-size 100 \
-                --upload-workers 6 \
-                --chunk-workers 4 \
                 --repo-id $HF_REPO_ID
             ) &
             pids+=($!)

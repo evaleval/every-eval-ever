@@ -590,159 +590,92 @@ def process_with_optimization(args):
     logger.info(f"📊 Found {total_new_tasks} new tasks to process")
     logger.info("=" * 60)
     logger.info("🚀 Starting optimized processing")
-    logger.info(f"📦 Processing {len(task_chunks)} chunks")
-    logger.info(f"🔀 {min(len(task_chunks), args.chunk_workers)} parallel chunk workers")
+    logger.info(f"📦 Processing {len(task_chunks)} chunks sequentially")
     logger.info(f"⚡ {args.max_workers} workers per chunk")
-    logger.info(f"☁️ {args.upload_workers} upload workers")
     logger.info("=" * 60)
     
-    # Process chunks with uploads in parallel
-    upload_executor = ThreadPoolExecutor(max_workers=args.upload_workers)
+    # Process chunks sequentially (one at a time) to reduce resource contention
+    # Only the 3 benchmarks run in parallel, but within each benchmark chunks are sequential
     
-    # NEW: Process chunks in parallel instead of serially
-    chunk_executor = ThreadPoolExecutor(max_workers=min(len(task_chunks), args.chunk_workers))  # Limit concurrent chunks
-    
-    upload_futures = []
-    chunk_futures = []
     successful_uploads = 0
-    # Use the same counter for both chunk ID and part number since they're in sync
     current_number = start_number
     uploaded_remote_names = []
     
     start_time = time.time()
     
-    logger.info(f"🚀 Starting PARALLEL chunk processing with {min(len(task_chunks), args.chunk_workers)} concurrent chunks")
+    logger.info(f"🔄 Starting SEQUENTIAL chunk processing ({len(task_chunks)} chunks total)")
+    logger.info(f"📦 Chunk size: {args.chunk_size} tasks | Workers per chunk: {args.max_workers}")
     
-    # Submit all chunks for parallel processing
-    chunk_number_mapping = {}  # Track chunk number for each future
-    chunk_tasks_mapping = {}  # Track tasks for each chunk number
+    # Process chunks one by one sequentially
     for chunk_idx, chunk_tasks in enumerate(task_chunks):
         chunk_number = current_number + chunk_idx
-        chunk_number_mapping[chunk_idx] = chunk_number
-        chunk_tasks_mapping[chunk_number] = chunk_tasks  # Store tasks for manifest updates
         
-        logger.info(f"🔄 Submitting chunk {chunk_idx+1}/{len(task_chunks)} (ID: {chunk_number}) for parallel processing")
-        
-        # Submit chunk for parallel processing
-        chunk_future = chunk_executor.submit(
-            process_chunk, chunk_tasks, chunk_number, args.max_workers, args.timeout, benchmark_name
-        )
-        chunk_futures.append((chunk_idx, chunk_future, chunk_number))
-    
-    # Process completed chunks as they finish and submit for upload
-    completed_chunks = 0
-    logger.info(f"🔄 Starting to wait for {len(chunk_futures)} chunk futures to complete...")
-    
-    # Use as_completed to handle chunks as they finish (regardless of order)
-    from concurrent.futures import as_completed
-    
-    # Create a mapping from future to chunk info
-    future_to_chunk = {}
-    for chunk_idx, chunk_future, chunk_number in chunk_futures:
-        future_to_chunk[chunk_future] = (chunk_idx, chunk_number)
-    
-    # Process chunks as they complete (not in order)
-    for chunk_future in as_completed([f for _, f, _ in chunk_futures], timeout=args.timeout * 60 * len(chunk_futures)):
-        chunk_idx, chunk_number = future_to_chunk[chunk_future]
+        logger.info(f"\n🚀 Processing chunk {chunk_idx+1}/{len(task_chunks)} (ID: {chunk_number})")
+        logger.info(f"📝 Chunk contains {len(chunk_tasks)} tasks")
         
         try:
-            logger.info(f"⏳ Chunk {chunk_idx+1} (ID: {chunk_number}) has completed, getting result...")
-            
-            chunk_file = chunk_future.result()  # No timeout needed since it's already complete
-            completed_chunks += 1
-            
-            logger.info(f"🎯 Chunk {chunk_idx+1} (ID: {chunk_number}) result: {chunk_file}")
+            # Process chunk synchronously 
+            chunk_file = process_chunk(chunk_tasks, chunk_number, args.max_workers, args.timeout, benchmark_name)
             
             if chunk_file:
-                logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed successfully: {chunk_file}")
+                logger.info(f"✅ Chunk {chunk_number} completed successfully: {chunk_file}")
                 
                 # Update manifest immediately with processed tasks (before upload)
-                chunk_tasks_for_manifest = chunk_tasks_mapping.get(chunk_number, [])
-                update_manifest_incremental(benchmark_name, chunk_tasks_for_manifest, chunk_number, 
+                update_manifest_incremental(benchmark_name, chunk_tasks, chunk_number, 
                                            api=api, repo_id=args.repo_id)
                 
-                # Submit upload task immediately
-                logger.info(f"☁️ Submitting chunk {chunk_number} for upload...")
-                upload_future = upload_executor.submit(
-                    upload_file, api, chunk_file, args.repo_id, args.source_name, chunk_number, not args.no_cleanup
-                )
-                upload_futures.append((chunk_number, upload_future))
-                logger.info(f"📤 Upload future created for chunk {chunk_number}, total pending uploads: {len(upload_futures)}")
+                # Upload chunk synchronously (wait for it to complete before next chunk)
+                logger.info(f"☁️ Uploading chunk {chunk_number}...")
+                try:
+                    remote_name = upload_file(api, chunk_file, args.repo_id, args.source_name, chunk_number, not args.no_cleanup)
+                    if remote_name:
+                        successful_uploads += 1
+                        uploaded_remote_names.append({
+                            'chunk_number': chunk_number,
+                            'remote_name': remote_name,
+                            'task_count': len(chunk_tasks)
+                        })
+                        
+                        # Update manifest with upload info
+                        update_manifest_incremental(benchmark_name, chunk_tasks, chunk_number, 
+                                                   remote_name=remote_name, api=api, repo_id=args.repo_id)
+                        
+                        logger.info(f"📤 Chunk {chunk_number} uploaded successfully: {remote_name}")
+                    else:
+                        logger.error(f"❌ Upload failed for chunk {chunk_number}")
+                        
+                except Exception as upload_error:
+                    logger.error(f"❌ Upload error for chunk {chunk_number}: {upload_error}")
                 
-                # Start a background thread to update manifest when this upload completes
-                def update_manifest_on_upload_complete():
-                    try:
-                        remote_name = upload_future.result()  # Wait for upload to complete
-                        if remote_name:
-                            logger.info(f"� Updating manifest for completed upload: chunk {chunk_number} -> {remote_name}")
-                            # Update manifest immediately with upload info
-                            update_manifest_incremental(benchmark_name, chunk_tasks_for_manifest, chunk_number, 
-                                                       remote_name=remote_name, api=api, repo_id=args.repo_id)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to update manifest for chunk {chunk_number}: {e}")
-                
-                # Run manifest update in background thread
-                manifest_thread = threading.Thread(target=update_manifest_on_upload_complete, daemon=True)
-                manifest_thread.start()
-                
-                # Update progress with detailed metrics
-                elapsed = time.time() - start_time
-                elapsed_minutes = elapsed / 60
-                progress = completed_chunks / len(task_chunks)
-                eta_minutes = (elapsed / progress - elapsed) / 60 if progress > 0 else 0
-                total_entries = completed_chunks * args.chunk_size  # Approximate
-                processing_rate = total_entries / elapsed if elapsed > 0 else 0
-                
-                logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed and submitted for upload")
-                logger.info(f"📈 Progress: {completed_chunks}/{len(task_chunks)} chunks ({progress:.1%}) | ~{total_entries:,} entries")
-                logger.info(f"⏱️ Elapsed: {elapsed_minutes:.1f}min | ETA: {eta_minutes:.1f}min | Rate: {processing_rate:.0f} entries/sec")
             else:
-                logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed: no output file generated")
+                logger.error(f"❌ Chunk {chunk_number} failed: no output file generated")
                 
         except Exception as e:
-            logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed with error: {e}")
-    
-    # Shutdown chunk executor
-    chunk_executor.shutdown(wait=True)
-    
-    # Wait for all uploads to complete
-    logger.info(f"\n⏳ Waiting for {len(upload_futures)} uploads to complete...")
-    if len(upload_futures) == 0:
-        logger.warning("⚠️ No upload futures found - this means no chunks completed successfully")
-    
-    # Wait for all uploads and collect remote names
-    for i, (chunk_number, future) in enumerate(upload_futures, 1):
-        try:
-            logger.info(f"⏳ Waiting for upload {i}/{len(upload_futures)} of chunk {chunk_number}...")
-            remote_name = future.result(timeout=300)  # 5 minute timeout per upload
-            if remote_name:
-                successful_uploads += 1
-                uploaded_remote_names.append({
-                    'chunk_number': chunk_number,
-                    'remote_name': remote_name
-                })
-                logger.info(f"✅ Successfully uploaded chunk {chunk_number} as {remote_name}")
-                
-                # Update manifest with upload info
-                chunk_tasks_for_manifest = chunk_tasks_mapping.get(chunk_number, [])
-                update_manifest_incremental(benchmark_name, chunk_tasks_for_manifest, chunk_number, 
-                                           remote_name=remote_name, api=api, repo_id=args.repo_id)
-            else:
-                logger.error(f"❌ Upload failed for chunk {chunk_number}: no remote name returned")
-        except TimeoutError:
-            logger.error(f"⏰ Upload timeout for chunk {chunk_number} after 5 minutes")
-        except Exception as e:
-            logger.error(f"❌ Upload failed for chunk {chunk_number}: {e}")
-    upload_executor.shutdown(wait=True)
+            logger.error(f"❌ Chunk {chunk_number} failed with error: {e}")
+        
+        # Update progress with detailed metrics
+        completed_chunks = chunk_idx + 1
+        elapsed = time.time() - start_time
+        elapsed_minutes = elapsed / 60
+        progress = completed_chunks / len(task_chunks)
+        eta_minutes = (elapsed / progress - elapsed) / 60 if progress > 0 else 0
+        total_entries = completed_chunks * args.chunk_size  # Approximate
+        processing_rate = total_entries / elapsed if elapsed > 0 else 0
+        
+        logger.info(f"📈 Progress: {completed_chunks}/{len(task_chunks)} chunks ({progress:.1%}) | ~{total_entries:,} entries")
+        logger.info(f"⏱️ Elapsed: {elapsed_minutes:.1f}min | ETA: {eta_minutes:.1f}min | Rate: {processing_rate:.0f} entries/sec")
+        logger.info(f"📊 Successful uploads: {successful_uploads}/{completed_chunks}")
+        
+    logger.info(f"\n✅ All chunks processed sequentially")
     
     total_time = time.time() - start_time
     logger.info("\n" + "=" * 60)
     logger.info("🎉 Processing complete!")
     logger.info(f"✅ Processed chunks: {len(task_chunks)}/{len(task_chunks)}")
-    logger.info(f"☁️ Successful uploads: {successful_uploads}/{len(upload_futures)}")
-    logger.info(f"📊 Total entries: ~{sum(len(chunk) for chunk in task_chunks) * 500}")  # Approximate
+    logger.info(f"☁️ Successful uploads: {successful_uploads}")
+    logger.info(f"� Total entries: ~{sum(len(chunk) for chunk in task_chunks)}")  # Actual count
     logger.info(f"⏱️ Total time: {total_time/60:.1f} minutes")
-    logger.info(f"📈 Rate: {(sum(len(chunk) for chunk in task_chunks) * 500) / (total_time/60):.1f} entries/minute")
+    logger.info(f"📈 Rate: {sum(len(chunk) for chunk in task_chunks) / (total_time/60):.1f} entries/minute")
     logger.info("=" * 60)
     
     # Final manifest update to ensure consistency (manifest was updated incrementally during processing)
@@ -758,9 +691,8 @@ def process_with_optimization(args):
     except Exception as e:
         logger.warning(f"⚠️ Error reading final manifest: {e}")
 
-    return successful_uploads == len(upload_futures)
-
-
+    return successful_uploads == len(task_chunks)
+    
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Optimized HELM processor with chunked processing")
@@ -769,8 +701,6 @@ def main():
     parser.add_argument("--csv-file", type=str, help="Direct path to CSV file (overrides benchmark)")
     parser.add_argument("--chunk-size", type=int, default=100, help="Tasks per chunk (default: 100 for maximum parallelization)")
     parser.add_argument("--max-workers", type=int, default=8, help="Workers per chunk (default: 8)")
-    parser.add_argument("--upload-workers", type=int, default=6, help="Parallel upload workers (default: 6)")
-    parser.add_argument("--chunk-workers", type=int, default=4, help="Parallel chunk processing workers (default: 4)")
     parser.add_argument("--timeout", type=int, default=90, help="Timeout per chunk in minutes (default: 90, allows for network delays)")
     parser.add_argument("--repo-id", type=str, required=True, help="HuggingFace dataset repository ID")
     parser.add_argument("--source-name", type=str, default="helm", help="Source name for file organization")
@@ -816,7 +746,6 @@ def main():
     logger.info(f"  📄 CSV file: {csv_file}")
     logger.info(f"  📦 Chunk size: {args.chunk_size}")
     logger.info(f"  ⚡ Max workers: {args.max_workers}")
-    logger.info(f"  ☁️ Upload workers: {args.upload_workers}")
     logger.info(f"  ⏱️ Timeout: {args.timeout} minutes")
     logger.info(f"  📊 Repository: {args.repo_id}")
     logger.info(f"  🏷️ Source: {args.source_name}")
