@@ -115,7 +115,7 @@ jobs:
           PYTHONUNBUFFERED: 1
         run: |
           echo "📥 Fetching manifests from HuggingFace to speed up stats generation..."
-          python -c "import os; from huggingface_hub import hf_hub_download; os.makedirs('data/aggregated', exist_ok=True); repo_id = os.environ.get('HF_REPO_ID'); [print(f'Downloaded manifest for {bm}') if hf_hub_download(repo_id=repo_id, filename=f'manifests/manifest_{bm}.json', repo_type='dataset', local_dir='data/aggregated') or True else print(f'No manifest for {bm}') for bm in ['lite','mmlu','classic']]" || echo "⚠️ Some manifests not found, continuing..."
+          python -c "import os; from huggingface_hub import hf_hub_download; os.makedirs('data/aggregated', exist_ok=True); repo_id = os.environ.get('HF_REPO_ID'); [print(f'Downloaded manifest for helm_{bm}') if hf_hub_download(repo_id=repo_id, filename=f'manifests/manifest_helm_{bm}.json', repo_type='dataset', local_dir='data/aggregated') or True else print(f'No manifest for helm_{bm}') for bm in ['lite','mmlu','classic']]" || echo "⚠️ Some manifests not found, continuing..."
 
           echo ""
           echo "📊 STEP 2: GENERATING COMPREHENSIVE DATASET STATISTICS"

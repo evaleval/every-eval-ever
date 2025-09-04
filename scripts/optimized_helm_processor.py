@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-Optimized HELM processor with chunked processing and parallel uploads.
+Optimized HELM processor with chunked processing and source-specific manifests.
 
 This script modifies the existing HELM processing flow to:
-1. Process tasks in configurable chunks (default: 200 tasks)
+1. Process tasks in configurable chunks (default: 100 tasks)
 2. Generate intermediate parquet files after each chunk
 3. Upload chunks to HuggingFace immediately
 4. Clean up local files to save disk space
-5. Continue processing while uploading in background
+5. Create source-specific manifest files for future-proofing
 
 Key optimizations:
-- Parallel processing within chunks (2-4 workers)
+- Sequential chunk processing to reduce resource contention
 - Immediate upload of completed chunks
 - Memory-efficient processing (smaller batches)
 - Disk space management (cleanup after upload)
 - Progress tracking and ETA estimation
+- Source-specific manifests (e.g., manifest_helm_lite.json)
 
 Usage:
-    python scripts/optimized_helm_processor.py --benchmark lite --chunk-size 200 --max-workers 4 --repo-id evaleval/every_eval_ever
+    python scripts/optimized_helm_processor.py --benchmark lite --chunk-size 100 --max-workers 8 --repo-id evaleval/every_eval_ever
 """
 
 import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -89,13 +91,13 @@ def get_existing_files(api: HfApi, repo_id: str) -> set:
         return set()
 
 
-def get_processed_tasks(api: HfApi, repo_id: str, benchmark: str) -> set:
+def get_processed_tasks(api: HfApi, repo_id: str, benchmark: str, source: str = "helm") -> set:
     """Get set of tasks that have already been processed for this benchmark using manifest files (much faster)."""
     processed_tasks = set()
     
     try:
         # First try to read from local manifest (fastest)
-        local_manifest_path = Path('data/aggregated') / f"manifest_{benchmark}.json"
+        local_manifest_path = Path('data/aggregated') / f"manifest_{source}_{benchmark}.json"
         if local_manifest_path.exists():
             logger.info(f"📋 Reading local manifest: {local_manifest_path}")
             with open(local_manifest_path, 'r') as f:
@@ -106,23 +108,31 @@ def get_processed_tasks(api: HfApi, repo_id: str, benchmark: str) -> set:
                     return processed_tasks
         
         # If no local manifest, try downloading from HuggingFace
-        logger.info(f"🔍 Checking for manifest on HuggingFace: manifests/manifest_{benchmark}.json")
+        logger.info(f"🔍 Checking for manifest on HuggingFace: manifests/manifest_{source}_{benchmark}.json")
         try:
             from huggingface_hub import hf_hub_download
             os.makedirs('data/aggregated', exist_ok=True)
             
+            # Download to the correct location that update_manifest_incremental expects
             manifest_file = hf_hub_download(
                 repo_id=repo_id,
-                filename=f'manifests/manifest_{benchmark}.json',
+                filename=f'manifests/manifest_{source}_{benchmark}.json',
                 repo_type='dataset',
-                local_dir='data/aggregated'
+                local_dir='data',  # This will create data/manifests/manifest_X.json
+                local_dir_use_symlinks=False
             )
             
-            with open(manifest_file, 'r') as f:
+            # Copy to the location expected by update_manifest_incremental
+            expected_path = Path('data/aggregated') / f"manifest_{source}_{benchmark}.json"
+            shutil.copy2(manifest_file, expected_path)
+            logger.info(f"📥 Downloaded manifest to: {expected_path}")
+            
+            with open(expected_path, 'r') as f:
                 manifest_data = json.load(f)
                 if 'processed_tasks' in manifest_data:
                     processed_tasks.update(manifest_data['processed_tasks'])
                     logger.info(f"✅ Downloaded and loaded {len(processed_tasks)} processed tasks from HF manifest")
+                    logger.info(f"📊 Manifest contains {len(manifest_data.get('files', []))} uploaded files")
                     return processed_tasks
                     
         except Exception as e:
@@ -403,17 +413,19 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
         return None
 
 
-def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chunk_number: int, remote_name: str = None, api: HfApi = None, repo_id: str = None):
+def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chunk_number: int, remote_name: str = None, api: HfApi = None, repo_id: str = None, source: str = "helm"):
     """Update the manifest file incrementally as chunks complete."""
     try:
-        manifest_path = Path('data/aggregated') / f"manifest_{benchmark_name}.json"
+        manifest_path = Path('data/aggregated') / f"manifest_{source}_{benchmark_name}.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Load existing manifest or create new one
         if manifest_path.exists():
             with open(manifest_path, 'r') as f:
                 manifest_data = json.load(f)
+            logger.info(f"📖 Loading existing manifest: {len(manifest_data.get('processed_tasks', []))} tasks, {len(manifest_data.get('files', []))} files")
         else:
+            logger.info(f"📝 Creating new manifest for {benchmark_name}")
             manifest_data = {
                 'benchmark': benchmark_name,
                 'generated_at': datetime.now(timezone.utc).isoformat(),
@@ -423,10 +435,15 @@ def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chu
                 'chunk_count': 0
             }
         
-        # Add chunk tasks to processed_tasks
+        # Track what we're adding
+        new_tasks = []
         for task in chunk_tasks:
             if task not in manifest_data['processed_tasks']:
                 manifest_data['processed_tasks'].append(task)
+                new_tasks.append(task)
+        
+        if new_tasks:
+            logger.info(f"➕ Adding {len(new_tasks)} new tasks to manifest")
         
         # Add file info if upload completed
         if remote_name:
@@ -437,6 +454,9 @@ def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chu
                     'chunk_number': chunk_number,
                     'remote_name': remote_name
                 })
+                logger.info(f"➕ Adding new file to manifest: chunk {chunk_number} -> {remote_name}")
+            else:
+                logger.info(f"📋 File already in manifest: chunk {chunk_number}")
         
         # Update metadata
         manifest_data['processed_tasks'] = sorted(list(set(manifest_data['processed_tasks'])))
@@ -448,19 +468,23 @@ def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chu
         with open(manifest_path, 'w') as f:
             json.dump(manifest_data, f, indent=2)
         
-        logger.info(f"📦 Updated manifest: {manifest_path} ({manifest_data['task_count']} tasks, {manifest_data['chunk_count']} files)")
+        logger.info(f"� Updated manifest: {manifest_path} ({manifest_data['task_count']} tasks, {manifest_data['chunk_count']} files)")
         
         # Upload updated manifest to HF if API is available
         if api and repo_id:
             try:
                 api.upload_file(
                     path_or_fileobj=str(manifest_path),
-                    path_in_repo=f"manifests/manifest_{benchmark_name}.json",
+                    path_in_repo=f"manifests/manifest_{source}_{benchmark_name}.json",
                     repo_id=repo_id,
                     repo_type='dataset',
                     run_as_future=False
                 )
-                logger.info(f"☁️ Updated manifest on HF: manifests/manifest_{benchmark_name}.json")
+                logger.info(f"☁️ Updated manifest on HF: manifests/manifest_{source}_{benchmark_name}.json")
+                
+                # TODO: Optional master index update for repo-wide statistics
+                # update_master_index(benchmark_name, manifest_data, api, repo_id)
+                
             except Exception as e:
                 logger.warning(f"⚠️ Failed to upload updated manifest to HF: {e}")
         
@@ -570,7 +594,7 @@ def process_with_optimization(args):
     processed_tasks = set()
     if not args.skip_duplicate_check:
         logger.info("🔍 Checking for already processed tasks to avoid duplicates...")
-        processed_tasks = get_processed_tasks(api, args.repo_id, benchmark_name)
+        processed_tasks = get_processed_tasks(api, args.repo_id, benchmark_name, args.source_name)
     else:
         logger.info("⏭️ Skipping duplicate check as requested")
     
@@ -622,7 +646,7 @@ def process_with_optimization(args):
                 
                 # Update manifest immediately with processed tasks (before upload)
                 update_manifest_incremental(benchmark_name, chunk_tasks, chunk_number, 
-                                           api=api, repo_id=args.repo_id)
+                                           api=api, repo_id=args.repo_id, source=args.source_name)
                 
                 # Upload chunk synchronously (wait for it to complete before next chunk)
                 logger.info(f"☁️ Uploading chunk {chunk_number}...")
@@ -638,7 +662,7 @@ def process_with_optimization(args):
                         
                         # Update manifest with upload info
                         update_manifest_incremental(benchmark_name, chunk_tasks, chunk_number, 
-                                                   remote_name=remote_name, api=api, repo_id=args.repo_id)
+                                                   remote_name=remote_name, api=api, repo_id=args.repo_id, source=args.source_name)
                         
                         logger.info(f"📤 Chunk {chunk_number} uploaded successfully: {remote_name}")
                     else:
@@ -680,12 +704,12 @@ def process_with_optimization(args):
     
     # Final manifest update to ensure consistency (manifest was updated incrementally during processing)
     try:
-        manifest_path = Path('data/aggregated') / f"manifest_{benchmark_name}.json"
+        manifest_path = Path('data/aggregated') / f"manifest_{args.source_name}_{benchmark_name}.json"
         if manifest_path.exists():
             with open(manifest_path, 'r') as f:
                 manifest_data = json.load(f)
             logger.info(f"📦 Final manifest summary: {manifest_data['task_count']} tasks, {manifest_data['chunk_count']} uploaded files")
-            logger.info(f"☁️ Manifest available at: manifests/manifest_{benchmark_name}.json")
+            logger.info(f"☁️ Manifest available at: manifests/manifest_{args.source_name}_{benchmark_name}.json")
         else:
             logger.warning(f"⚠️ No manifest file found at {manifest_path}")
     except Exception as e:
