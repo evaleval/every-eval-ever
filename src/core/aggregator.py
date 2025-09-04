@@ -100,9 +100,12 @@ def aggregate_to_parquet(
             # Add source metadata
             df["source"] = source_name
             
-            # Add processing timestamp
-            from datetime import datetime
-            df["processed_at"] = datetime.now().isoformat()
+            # Add comprehensive timestamp metadata
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc)
+            df["processed_at"] = current_time.isoformat()
+            df["aggregation_timestamp"] = current_time.isoformat()
+            df["pipeline_stage"] = "aggregation"
 
             frames.append(df)
 
@@ -112,7 +115,7 @@ def aggregate_to_parquet(
         batch_df = pd.concat(frames, ignore_index=True)
 
         # Define final column order with new metadata columns
-        final_columns = ["source", "processed_at"] + [col for col in ALL_COLUMNS if col in batch_df.columns]
+        final_columns = ["source", "processed_at", "aggregation_timestamp", "pipeline_stage"] + [col for col in ALL_COLUMNS if col in batch_df.columns]
         batch_df = batch_df.reindex(columns=final_columns)
 
         table = pa.Table.from_pandas(batch_df, preserve_index=False)

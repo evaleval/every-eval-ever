@@ -1,0 +1,118 @@
+name: Generate Comprehensive Statistics
+
+on:
+  schedule:
+    # Daily at 06:00 UTC (after weekly data processing completes)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      source_name:
+        description: 'Source name to process (e.g., helm, eval_harness)'
+        required: false
+        default: 'helm'
+        type: string
+      force_regenerate:
+        description: 'Force regenerate even if recent stats exist'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  generate_comprehensive_stats:
+    name: Generate Comprehensive Statistics from All Data
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install huggingface_hub
+
+      - name: Generate comprehensive statistics
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONUNBUFFERED: 1
+        run: |
+          # Generate comprehensive statistics by downloading and processing
+          # all data shards incrementally to avoid memory issues
+          
+          SOURCE_NAME="${{ github.event.inputs.source_name || 'helm' }}"
+          
+          echo "🚀 Starting comprehensive statistics generation for source: $SOURCE_NAME"
+          echo "� Started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          echo "🖥️  Runner: ${{ runner.os }}"
+          echo "�📊 This will process all uploaded data shards incrementally"
+          echo "⚡ Memory efficient: processes one shard at a time"
+          
+          python scripts/generate_comprehensive_stats.py \
+            --main-repo-id evaleval/every_eval_ever \
+            --stats-repo-id evaleval/every_eval_score_ever \
+            --source-name "$SOURCE_NAME"
+          
+          echo "📅 Completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+
+      - name: Validate statistics output
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Quick validation that statistics were generated successfully
+          python -c "
+          import os
+          from huggingface_hub import HfApi, list_repo_files
+          
+          token = os.environ.get('HF_TOKEN')
+          if not token:
+              print('❌ HF_TOKEN not available for validation')
+              exit(1)
+          
+          try:
+              api = HfApi()
+              files = list_repo_files(
+                  repo_id='evaleval/every_eval_score_ever',
+                  repo_type='dataset'
+              )
+              
+              # Look for recent comprehensive stats files
+              stats_files = [f for f in files if 'comprehensive_stats' in f]
+              
+              if stats_files:
+                  print(f'✅ Found {len(stats_files)} comprehensive statistics files')
+                  print('📁 Recent stats files:')
+                  for f in sorted(stats_files)[-3:]:  # Show last 3
+                      print(f'   📄 {f}')
+              else:
+                  print('⚠️ No comprehensive statistics files found')
+                  
+          except Exception as e:
+              print(f'❌ Validation failed: {e}')
+              exit(1)
+          "
+
+  notify_completion:
+    name: Notify Statistics Generation Completion
+    needs: generate_comprehensive_stats
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Report results
+        run: |
+          if [ "${{ needs.generate_comprehensive_stats.result }}" == "success" ]; then
+            echo "🎉 Comprehensive statistics generation completed successfully!"
+            echo "📊 Statistics are now available at: evaleval/every_eval_score_ever"
+            echo "🔄 Next scheduled run: Tomorrow at 06:00 UTC"
+          else
+            echo "❌ Comprehensive statistics generation failed"
+            echo "🔧 Check the logs above for details"
+            echo "💡 You can manually trigger this workflow to retry"
+          fi

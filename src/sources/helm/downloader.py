@@ -193,14 +193,24 @@ def download_task(task: str, output_dir: str, benchmark: str, overwrite: bool = 
 
 
 def download_tasks(tasks: List[str], output_dir: str, benchmark: str, overwrite: bool = False,
-                   start_version: str = DEFAULT_START_VERSION) -> List[str]:
+                   start_version: str = DEFAULT_START_VERSION, show_progress: bool = True) -> List[str]:
     """
     Download a list of tasks and return the paths to the saved files.
+    
+    Args:
+        tasks: List of task names to download
+        output_dir: Directory to save downloaded files
+        benchmark: Benchmark name
+        overwrite: Whether to overwrite existing files
+        start_version: HELM version to start from
+        show_progress: Whether to show progress bar (disable for cleaner output in sequential mode)
     """
     log_step(f"Downloading {len(tasks)} tasks", "🔽")
 
     saved_files = []
-    for task in tqdm(tasks, desc="Processing tasks"):
+    task_iterator = tqdm(tasks, desc="Processing tasks") if show_progress else tasks
+    
+    for task in task_iterator:
         log_step(f"Starting download for task: {task}")
         saved_file = download_task(task, output_dir, benchmark, overwrite, start_version)
         if saved_file:

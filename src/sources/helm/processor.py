@@ -140,10 +140,19 @@ def cleanup(zip_path: str) -> None:
 
 
 def process_line(line: str, output_dir: str, benchmark: str, downloads_dir: str = None, 
-                 keep_temp_files: bool = False, overwrite: bool = False) -> dict:
+                 keep_temp_files: bool = False, overwrite: bool = False, show_progress: bool = True) -> dict:
     """
     Process a single line from start to finish
     Returns a dictionary with the results
+    
+    Args:
+        line: Task line to process
+        output_dir: Output directory for processed files
+        benchmark: Benchmark name
+        downloads_dir: Directory for downloads (optional)
+        keep_temp_files: Whether to keep temporary files
+        overwrite: Whether to overwrite existing files
+        show_progress: Whether to show download progress bars
     """
     log_step(f"Processing line: {line}", "🔄")
 
@@ -185,7 +194,8 @@ def process_line(line: str, output_dir: str, benchmark: str, downloads_dir: str 
         
         # Download the data
         log_step(f"Starting download phase", "🔽")
-        downloaded_files = download_tasks([line], output_dir=actual_downloads_dir, benchmark=benchmark, overwrite=overwrite)
+        downloaded_files = download_tasks([line], output_dir=actual_downloads_dir, benchmark=benchmark, 
+                                        overwrite=overwrite, show_progress=show_progress)
         if not downloaded_files:
             log_error(f"No files were downloaded")
             raise ValueError("No files were downloaded")
@@ -261,9 +271,18 @@ def helm_main_func(csv_file: str, output_dir: Path, benchmark: str, adapter_meth
         )
 
         # Parallel execution with a fixed-size process pool
+        # Note: When max_workers > 1, progress tracking may be less clean due to concurrent processes
+        if max_workers == 1:
+            log_info(f"🔄 Sequential processing enabled for clean progress tracking")
+        else:
+            log_warning(f"⚡ Parallel processing with {max_workers} workers - progress bars may overlap")
+            
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Disable inner progress bars in single-worker mode to avoid overlap
+            show_progress = max_workers > 1
+            
             future_to_line = {
-                executor.submit(process_line, line, output_dir, benchmark, downloads_dir, keep_temp_files, overwrite): line for line in
+                executor.submit(process_line, line, output_dir, benchmark, downloads_dir, keep_temp_files, overwrite, show_progress): line for line in
                 lines}
 
             for future in as_completed(future_to_line):

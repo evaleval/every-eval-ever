@@ -84,12 +84,14 @@ def find_next_part_number(api: HfApi, repo_id: str) -> int:
 def process_benchmark(benchmark: str, part_num: int, source_name: str, 
                      max_workers: int = 2, timeout: int = 3600) -> Path:
     """Process a single benchmark and create parquet file."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    start_time = datetime.now()
+    timestamp = start_time.strftime("%Y%m%d_%H%M%S")
     
     logger.info(f"\n{'='*50}")
     logger.info(f"🔄 Processing benchmark: {benchmark}")
     logger.info(f"   Part number: {part_num}")
     logger.info(f"   Source: {source_name}")
+    logger.info(f"   Started at: {start_time.isoformat()}")
     logger.info(f"{'='*50}")
     
     # Create shard filename with incremental numbering
@@ -168,8 +170,43 @@ def process_benchmark(benchmark: str, part_num: int, source_name: str,
         else:
             raise FileNotFoundError(f"Expected aggregated file not found: {aggregated_file}")
         
+        # Step 3: Generate statistics from the aggregated data
+        stats_output_path = output_path.parent / f"stats-{output_path.name}"
+        stats_cmd = [
+            sys.executable, "-m", "src.core.stats_aggregator",
+            "--input-file", str(output_path),
+            "--output-file", str(stats_output_path),
+            "--source-name", source_name
+        ]
+        
+        logger.info(f"📊 Step 3 - Generating statistics: {' '.join(stats_cmd)}")
+        
+        stats_process = subprocess.Popen(
+            stats_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # Stream stats output
+        for line in stats_process.stdout:
+            logger.info(f"   [STATS] {line.rstrip()}")
+        
+        stats_process.wait(timeout=timeout)
+        
+        if stats_process.returncode != 0:
+            raise subprocess.CalledProcessError(stats_process.returncode, stats_cmd)
+        
+        logger.info(f"✅ Statistics generated: {stats_output_path.name}")
+        
+        end_time = datetime.now()
+        duration = end_time - start_time
         logger.info(f"✅ Successfully processed {benchmark}")
-        return output_path
+        logger.info(f"⏱️  Total processing time: {duration.total_seconds():.1f} seconds")
+        logger.info(f"📅 Completed at: {end_time.isoformat()}")
+        return output_path, stats_output_path
         
     except subprocess.TimeoutExpired:
         process.kill()
@@ -185,6 +222,8 @@ def process_benchmark(benchmark: str, part_num: int, source_name: str,
 
 def upload_shard(api: HfApi, file_path: Path, repo_id: str, token: str):
     """Upload a parquet shard to HuggingFace and clean up local file."""
+    upload_start = datetime.now()
+    
     if not file_path.exists():
         logger.warning(f"⚠️ Output file not found: {file_path}")
         return
@@ -193,6 +232,7 @@ def upload_shard(api: HfApi, file_path: Path, repo_id: str, token: str):
     file_size = file_path.stat().st_size / (1024 * 1024)  # MB
     
     logger.info(f"☁️ Uploading shard: {file_path.name} ({file_size:.1f} MB)")
+    logger.info(f"📅 Upload started at: {upload_start.isoformat()}")
     
     try:
         api.upload_file(
@@ -202,7 +242,11 @@ def upload_shard(api: HfApi, file_path: Path, repo_id: str, token: str):
             repo_type='dataset',
             token=token,
         )
+        
+        upload_end = datetime.now()
+        upload_duration = upload_end - upload_start
         logger.info(f"✅ Uploaded {file_path.name} to dataset")
+        logger.info(f"⏱️  Upload time: {upload_duration.total_seconds():.1f} seconds")
         
         # Clean up local file to save space
         file_path.unlink()
@@ -213,9 +257,48 @@ def upload_shard(api: HfApi, file_path: Path, repo_id: str, token: str):
         raise
 
 
+def upload_stats_shard(api: HfApi, stats_file_path: Path, stats_repo_id: str, token: str):
+    """Upload statistics parquet shard to the stats HuggingFace dataset."""
+    upload_start = datetime.now()
+    
+    if not stats_file_path.exists():
+        logger.warning(f"⚠️ Stats file not found: {stats_file_path}")
+        return
+    
+    # Get file size for logging
+    file_size = stats_file_path.stat().st_size / (1024 * 1024)  # MB
+    
+    logger.info(f"📊 Uploading stats shard: {stats_file_path.name} ({file_size:.1f} MB)")
+    logger.info(f"📅 Stats upload started at: {upload_start.isoformat()}")
+    
+    try:
+        api.upload_file(
+            path_or_fileobj=str(stats_file_path),
+            path_in_repo=stats_file_path.name,
+            repo_id=stats_repo_id,
+            repo_type='dataset',
+            token=token,
+        )
+        
+        upload_end = datetime.now()
+        upload_duration = upload_end - upload_start
+        logger.info(f"✅ Uploaded {stats_file_path.name} to stats dataset ({stats_repo_id})")
+        logger.info(f"⏱️  Stats upload time: {upload_duration.total_seconds():.1f} seconds")
+        
+        # Clean up local file to save space
+        stats_file_path.unlink()
+        logger.info(f"🧹 Cleaned up local stats file {stats_file_path.name}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to upload stats {stats_file_path.name}: {e}")
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description="Incremental HELM scraper and uploader")
-    parser.add_argument("--repo-id", required=True, help="HuggingFace dataset repo ID")
+    parser.add_argument("--repo-id", required=True, help="HuggingFace dataset repo ID for detailed data")
+    parser.add_argument("--stats-repo-id", default="evaleval/every_eval_score_ever", 
+                       help="HuggingFace dataset repo ID for statistics")
     parser.add_argument("--benchmarks", nargs="+", default=["lite", "mmlu", "classic"],
                        help="Benchmarks to process")
     parser.add_argument("--source-name", default="helm", help="Source name for file naming")
@@ -246,8 +329,8 @@ def main():
             current_part_num = next_part_num + i
             
             try:
-                # Process benchmark
-                output_path = process_benchmark(
+                # Process benchmark - returns both detailed data and stats files
+                output_path, stats_path = process_benchmark(
                     benchmark, 
                     current_part_num, 
                     args.source_name,
@@ -255,8 +338,11 @@ def main():
                     args.timeout
                 )
                 
-                # Upload immediately
+                # Upload detailed data to main dataset
                 upload_shard(api, output_path, args.repo_id, token)
+                
+                # Upload statistics to stats dataset
+                upload_stats_shard(api, stats_path, args.stats_repo_id, token)
                 
             except Exception as e:
                 logger.error(f"❌ Failed to process benchmark {benchmark}: {e}")

@@ -70,7 +70,9 @@ HELM_FILE_TYPES: List[str] = [
 ]
 
 # Concurrency for `ProcessPoolExecutor` in `helm_data_processor.py`
-PROCESS_POOL_MAX_WORKERS: int = 8
+# Set to 1 by default to avoid log message conflicts and overlapping progress bars
+# Increase for faster processing if clean logs aren't needed
+PROCESS_POOL_MAX_WORKERS: int = 1
 
 # --------------------------------------------------------------------------------------
 # Small utility constants

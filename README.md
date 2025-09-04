@@ -50,12 +50,13 @@ python main.py helm --benchmark lite --keep-temp --verbose
 ```
 
 ### Accessing Processed Data
-The processed data is available on HuggingFace Hub:
+The processed data is available on HuggingFace Hub in two datasets:
 
+#### Detailed Evaluation Data
 ```python
 from datasets import load_dataset
 
-# Load the complete dataset
+# Load the complete detailed dataset (individual evaluation records)
 dataset = load_dataset("evaleval/every_eval_ever")
 
 # Stream for large datasets (recommended)
@@ -64,6 +65,24 @@ dataset = load_dataset("evaleval/every_eval_ever", streaming=True)
 # Filter for specific sources
 helm_data = dataset.filter(lambda x: x['source'] == 'helm')
 ```
+
+#### Comprehensive Statistics (Leaderboard Data)
+```python
+# Load benchmark-model performance statistics
+stats_dataset = load_dataset("evaleval/every_eval_score_ever")
+
+# Get top performers across all benchmarks
+top_performers = stats_dataset['train'].sort('accuracy', reverse=True)
+
+# Filter for specific benchmarks
+gsm8k_stats = stats_dataset['train'].filter(lambda x: x['dataset_name'] == 'gsm8kscenario')
+```
+
+#### Data Overview
+- **`evaleval/every_eval_ever`**: Detailed individual evaluation records (~50MB per benchmark)
+- **`evaleval/every_eval_score_ever`**: Comprehensive benchmark-model statistics (~16KB total)
+- **Update Frequency**: Data weekly, statistics daily
+- **Schema**: Standardized across all evaluation sources
 
 ## 📋 How This Repository Works
 
@@ -112,12 +131,14 @@ ingestion_timestamp   # When processed
 # ... additional fields
 ```
 
-### 4. **Automated Processing**
+### 4. **Automated Dual-Dataset Processing**
 GitHub Actions automatically:
-- Runs weekly data collection
-- Processes new evaluations
-- Creates optimized Parquet shards
-- Uploads to HuggingFace Hub with incremental updates
+- Runs weekly data collection and processing
+- Creates detailed evaluation records in Parquet shards
+- Uploads to `evaleval/every_eval_ever` with incremental updates
+- Generates comprehensive statistics daily via incremental processing
+- Uploads leaderboard data to `evaleval/every_eval_score_ever`
+- Provides both granular data and aggregated insights
 
 ## 🧩 Supported Sources
 
@@ -140,13 +161,19 @@ python main.py helm --benchmark mmlu --max-workers 4
 
 ## 📊 Data Pipeline Overview
 
+### Primary Pipeline (Weekly)
 1. **Discovery**: Scrape source websites to find available evaluations
 2. **Download**: Fetch raw evaluation data and model outputs  
 3. **Convert**: Transform into standardized schema
 4. **Aggregate**: Combine into HuggingFace-optimized Parquet files
-5. **Upload**: Deploy to HuggingFace Hub with incremental updates
+5. **Upload**: Deploy detailed data to `evaleval/every_eval_ever`
 
-Each step is modular and can be run independently for debugging.
+### Statistics Pipeline (Daily)
+1. **Download**: Fetch all data shards incrementally (memory-efficient)
+2. **Aggregate**: Calculate comprehensive benchmark-model statistics
+3. **Upload**: Deploy leaderboard data to `evaleval/every_eval_score_ever`
+
+Each step is modular and can be run independently for debugging. The dual pipeline approach ensures both detailed research data and quick leaderboard access.
 
 ## ⚙️ Configuration
 
@@ -159,29 +186,62 @@ The repository uses several configuration files:
 
 ## 🤖 Automation
 
-### GitHub Actions Workflow
-The repository includes automated weekly processing:
+The repository uses **dual workflow architecture** for optimal modularity and resource management:
 
+### 📋 Workflow 1: Data Processing & Upload
 ```yaml
 # .github/workflows/scrape_and_upload.yml
 - Name: "Weekly Evaluation Data Processing"
 - Schedule: Mondays at 03:00 UTC
+- Purpose: Process and upload detailed evaluation data
 - Current: HELM (lite, mmlu, classic benchmarks)
 - Future: Multi-source parallel processing
-- Output: Incremental Parquet shards
-- Upload: Direct to HuggingFace Hub
+- Output: Detailed evaluation records + per-shard statistics
+- Upload: evaleval/every_eval_ever
+- Timeout: 6 hours (for heavy data processing)
 ```
 
-### Manual Automation
+### 📊 Workflow 2: Comprehensive Statistics Generation
+```yaml
+# .github/workflows/generate_comprehensive_stats.yml
+- Name: "Generate Comprehensive Statistics"
+- Schedule: Daily at 06:00 UTC (3 hours after data processing)
+- Purpose: Create unified leaderboard across all benchmarks
+- Method: Incremental processing (memory-efficient)
+- Output: Comprehensive benchmark-model statistics
+- Upload: evaleval/every_eval_score_ever
+- Timeout: 2 hours (for lighter aggregation)
+- Manual Trigger: With source selection and force regenerate options
+```
+
+### 🎯 Benefits of Dual Architecture
+- **Failure Isolation**: Data and stats workflows are independent
+- **Resource Optimization**: Each workflow uses appropriate timeouts
+- **Flexible Scheduling**: Weekly data collection, daily stats updates
+- **Manual Control**: Trigger stats generation anytime with custom parameters
+
+### Manual Data Processing
 For custom processing or testing:
 
 ```bash
-# Run the automation script locally
+# Run the data processing pipeline locally
 python scripts/incremental_upload.py \
   --repo-id your-org/your-dataset \
+  --stats-repo-id your-org/your-stats-dataset \
   --benchmarks lite mmlu classic \
   --source-name helm \
   --max-workers 2
+```
+
+### Manual Statistics Generation
+For generating comprehensive statistics:
+
+```bash
+# Generate comprehensive statistics from all uploaded data
+python scripts/generate_comprehensive_stats.py \
+  --main-repo-id evaleval/every_eval_ever \
+  --stats-repo-id evaleval/every_eval_score_ever \
+  --source-name helm
 ```
 
 ## 🔧 Adding New Data Sources
@@ -324,17 +384,30 @@ Update `scripts/incremental_upload.py` to support your source:
 SUPPORTED_SOURCES = ['helm', 'your_source_name']
 ```
 
-Update GitHub Actions workflow to include your source:
+Update both GitHub Actions workflows to include your source:
 
 ```yaml
-# In .github/workflows/scrape_and_upload.yml
+# In .github/workflows/scrape_and_upload.yml (Data Processing)
 - name: Process evaluation data and upload to HuggingFace
   run: |
     python scripts/incremental_upload.py \
       --repo-id evaleval/every_eval_ever \
+      --stats-repo-id evaleval/every_eval_score_ever \
       --benchmarks your_benchmark1 your_benchmark2 \
       --source-name your_source_name
+
+# In .github/workflows/generate_comprehensive_stats.yml (Statistics)
+- name: Generate comprehensive statistics
+  run: |
+    python scripts/generate_comprehensive_stats.py \
+      --main-repo-id evaleval/every_eval_ever \
+      --stats-repo-id evaleval/every_eval_score_ever \
+      --source-name your_source_name
 ```
+
+**Note**: The dual workflow architecture automatically handles your new source:
+- **Data workflow**: Processes and uploads your detailed evaluation data
+- **Stats workflow**: Includes your data in comprehensive statistics generation
 
 ### Step 7: Test Your Integration
 ```bash
@@ -519,43 +592,103 @@ plt.show()
 
 ## 🛠️ Output Format
 
-The processed data follows a consistent structure optimized for HuggingFace Datasets:
+The processed data is delivered through **two complementary datasets** optimized for different use cases:
 
-### File Naming Convention
+### Dataset 1: Detailed Evaluation Records (`evaleval/every_eval_ever`)
+
+**Purpose**: Individual evaluation instances for deep analysis and research
+
+#### File Naming Convention
 ```
-data-00001-helm.parquet      # First HELM shard  
-data-00002-helm.parquet      # Second HELM shard
-data-00003-openai.parquet    # First OpenAI Evals shard (future)
-data-00004-bigbench.parquet  # First BigBench shard (future)
+helm_lite_part_001.parquet       # HELM lite benchmark, part 1
+helm_mmlu_part_002.parquet       # HELM mmlu benchmark, part 2  
+helm_classic_part_003.parquet    # HELM classic benchmark, part 3
+stats-helm_lite_part_001.parquet # Per-shard statistics
 ```
 
-### Parquet Optimization
+#### Parquet Optimization
 - **Compression**: SNAPPY for fast read/write
 - **Row Groups**: 100,000 rows per group for optimal streaming
 - **Schema**: Consistent across all sources
-- **Size**: Approximately 50-100MB per shard
+- **Size**: Approximately 50MB per shard
 
-### Data Schema
-Each record contains standardized evaluation information:
+#### Data Schema
+Each record contains standardized evaluation information with rich metadata and comprehensive timestamps:
 
 ```python
 {
-  'evaluation_id': 'helm_mmlu_gpt4_001',
-  'dataset_name': 'mmlu_anatomy', 
-  'model_name': 'gpt-4',
-  'model_family': 'gpt',
-  'raw_input': 'What is the largest organ in the human body?',
-  'ground_truth': 'skin',
-  'output': 'The skin is the largest organ...',
-  'evaluation_score': 0.95,
-  'evaluation_method_name': 'exact_match',
+  # Core evaluation data
+  'dataset_name': 'openbookqa',
+  'hf_split': 'test', 
+  'hf_index': 4957,
+  'model_name': '01-ai/yi-34b',
+  'model_family': 'yi-34b',
+  'evaluation_method_name': 'label_only_match',
+  'evaluation_score': 1.0,
+  
+  # Rich metadata for analysis
+  'evaluation_id': 'bb232a7d24e9c049bf1a8bfbfb92192010e0e3b8585aab6c5f147507837dd2af',
+  'raw_input': 'A person wants to start saving money so that they can afford a nice vacation...',
+  'ground_truth': 'B',
+  'output': 'B',
+  
+  # Multi-source provenance and timestamps
   'source': 'helm',
-  'source_version': '1.0',
-  'ingestion_timestamp': '2024-01-15T10:30:00Z',
-  'license': 'apache-2.0',
-  'category': 'knowledge'
+  'processed_at': '2025-09-03T21:20:51.606743Z',
+  'aggregation_timestamp': '2025-09-03T21:20:51.606743Z',
+  'pipeline_stage': 'aggregation'
 }
 ```
+
+### Dataset 2: Comprehensive Statistics (`evaleval/every_eval_score_ever`)
+
+**Purpose**: Benchmark-model performance summaries for leaderboards and quick analysis
+
+#### File Naming Convention
+```
+comprehensive_stats_helm_20250903_120000.parquet  # Comprehensive stats with timestamp
+stats-helm_lite_part_001.parquet                 # Individual shard stats (also here)
+```
+
+#### Statistics Schema
+Each record represents a benchmark-model combination with aggregated metrics and comprehensive timestamps:
+
+```python
+{
+  # Identification
+  'source': 'helm',
+  'dataset_name': 'gsm8kscenario',
+  'model_name': 'openai/gpt-4-0613',
+  'model_family': 'gpt-4',
+  'evaluation_method_name': 'label_only_match',
+  
+  # Performance metrics
+  'total_samples': 1000,
+  'accuracy': 0.932,           # 93.2%
+  'mean_score': 0.932,
+  'std_score': 0.251746,
+  'min_score': 0.0,
+  'max_score': 1.0,
+  
+  # Metadata and timestamps
+  'processed_at': '2025-09-03T22:15:30.123456Z',
+  'statistics_generated_at': '2025-09-03T22:15:30.123456Z',
+  'comprehensive_stats_generated_at': '2025-09-03T22:15:30.123456Z',
+  'pipeline_stage': 'comprehensive_statistics',
+  'data_freshness_hours': 0
+}
+```
+
+### Dataset Comparison
+
+| Aspect | Detailed Records | Comprehensive Statistics |
+|--------|------------------|-------------------------|
+| **Use Case** | Research, debugging, deep analysis | Leaderboards, quick comparisons |
+| **Record Type** | Individual evaluations | Benchmark-model summaries |
+| **File Size** | ~50MB per benchmark | ~16KB total |
+| **Update Freq** | Weekly | Daily |
+| **Memory Usage** | High (streaming recommended) | Low (fits in memory) |
+| **Query Speed** | Slower (large data) | Faster (small data) |
 
 ## 🤝 Contributing
 
