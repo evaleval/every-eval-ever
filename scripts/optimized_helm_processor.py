@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -88,15 +89,52 @@ def get_existing_files(api: HfApi, repo_id: str) -> set:
 
 
 def get_processed_tasks(api: HfApi, repo_id: str, benchmark: str) -> set:
-    """Get set of tasks that have already been processed for this benchmark using efficient lazy loading."""
+    """Get set of tasks that have already been processed for this benchmark using manifest files (much faster)."""
     processed_tasks = set()
     
-    if not DATASETS_AVAILABLE:
-        logger.warning("⚠️ datasets library not available - skipping duplicate detection")
-        logger.info("📝 All tasks will be processed (install 'datasets' library for duplicate detection)")
-        return processed_tasks
-    
     try:
+        # First try to read from local manifest (fastest)
+        local_manifest_path = Path('data/aggregated') / f"manifest_{benchmark}.json"
+        if local_manifest_path.exists():
+            logger.info(f"📋 Reading local manifest: {local_manifest_path}")
+            with open(local_manifest_path, 'r') as f:
+                manifest_data = json.load(f)
+                if 'processed_tasks' in manifest_data:
+                    processed_tasks.update(manifest_data['processed_tasks'])
+                    logger.info(f"✅ Loaded {len(processed_tasks)} processed tasks from local manifest")
+                    return processed_tasks
+        
+        # If no local manifest, try downloading from HuggingFace
+        logger.info(f"🔍 Checking for manifest on HuggingFace: manifests/manifest_{benchmark}.json")
+        try:
+            from huggingface_hub import hf_hub_download
+            os.makedirs('data/aggregated', exist_ok=True)
+            
+            manifest_file = hf_hub_download(
+                repo_id=repo_id,
+                filename=f'manifests/manifest_{benchmark}.json',
+                repo_type='dataset',
+                local_dir='data/aggregated'
+            )
+            
+            with open(manifest_file, 'r') as f:
+                manifest_data = json.load(f)
+                if 'processed_tasks' in manifest_data:
+                    processed_tasks.update(manifest_data['processed_tasks'])
+                    logger.info(f"✅ Downloaded and loaded {len(processed_tasks)} processed tasks from HF manifest")
+                    return processed_tasks
+                    
+        except Exception as e:
+            logger.info(f"📝 No manifest found on HuggingFace: {e}")
+        
+        # Fallback to old method only if no manifest available and datasets library is present
+        if not DATASETS_AVAILABLE:
+            logger.warning("⚠️ datasets library not available - skipping duplicate detection")
+            logger.info("📝 All tasks will be processed (install 'datasets' library for duplicate detection)")
+            return processed_tasks
+        
+        logger.info("🐌 No manifest found, falling back to slow dataset streaming method...")
+        
         # Check if the dataset exists and has data
         try:
             # Use streaming for memory efficiency - don't load entire dataset into memory
@@ -564,16 +602,23 @@ def process_with_optimization(args):
     logger.info("=" * 60)
     # Write and upload manifest of uploaded files for faster downstream processing
     try:
+        # Collect all processed task IDs from the chunks
+        all_processed_tasks = set()
+        for chunk in task_chunks:
+            all_processed_tasks.update(chunk)
+        
         manifest_path = Path('data/aggregated') / f"manifest_{benchmark_name}.json"
-        import json
         manifest_data = {
             'benchmark': benchmark_name,
             'generated_at': datetime.now(timezone.utc).isoformat(),
-            'files': sorted(uploaded_remote_names, key=lambda x: x['chunk_number'])
+            'files': sorted(uploaded_remote_names, key=lambda x: x['chunk_number']),
+            'processed_tasks': sorted(list(all_processed_tasks)),
+            'task_count': len(all_processed_tasks),
+            'chunk_count': len(task_chunks)
         }
         with open(manifest_path, 'w') as fh:
-            json.dump(manifest_data, fh)
-        logger.info(f"📦 Wrote manifest: {manifest_path}")
+            json.dump(manifest_data, fh, indent=2)
+        logger.info(f"📦 Wrote manifest: {manifest_path} ({len(all_processed_tasks)} tasks)")
 
         # Upload manifest to HF for downstream jobs
         try:
