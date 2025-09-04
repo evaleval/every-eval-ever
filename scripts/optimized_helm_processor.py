@@ -79,7 +79,76 @@ def setup_hf_api(token: str, repo_id: str) -> HfApi:
         raise
 
 
+def get_next_chunk_numbers(api: HfApi, repo_id: str, count: int) -> range:
+    """
+    Get the next available chunk numbers with file-based locking to prevent race conditions.
+    This reserves a range of chunk numbers for a benchmark to use.
+    This is critical when multiple benchmarks run in parallel.
+    """
+    import fcntl
+    import time
+    
+    lock_file_path = Path("data/.chunk_number_lock")
+    lock_file_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    max_retries = 30  # Wait up to 30 seconds for lock
+    retry_delay = 1   # 1 second between retries
+    
+    for attempt in range(max_retries):
+        try:
+            # Try to acquire exclusive lock
+            with open(lock_file_path, 'w') as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                
+                logger.info(f"🔒 Acquired chunk number lock (attempt {attempt + 1})")
+                
+                # Now safely determine the next chunk numbers
+                existing_files = get_existing_files(api, repo_id)
+                
+                if existing_files:
+                    part_numbers = []
+                    for f in existing_files:
+                        try:
+                            if f.startswith('data-') and f.endswith('.parquet'):
+                                num = int(f.split('-')[1].split('.')[0])
+                                part_numbers.append(num)
+                        except ValueError:
+                            continue
+                    start_number = max(part_numbers) + 1 if part_numbers else 1
+                    logger.info(f"📊 Found {len(part_numbers)} existing chunks: {sorted(part_numbers)}")
+                else:
+                    start_number = 1
+                    logger.info(f"📊 No existing chunks found")
+                
+                # Reserve range of chunk numbers
+                chunk_range = range(start_number, start_number + count)
+                logger.info(f"🔢 Reserved chunk numbers: {start_number} to {start_number + count - 1} ({count} chunks)")
+                
+                # Lock is automatically released when file is closed
+                return chunk_range
+                
+        except (OSError, IOError):
+            # Lock is held by another process
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ Chunk number lock held by another process, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"❌ Failed to acquire chunk number lock after {max_retries} attempts")
+                raise RuntimeError("Could not acquire chunk number lock - another process may be stuck")
+    
+    raise RuntimeError("Unexpected exit from chunk number acquisition loop")
+
+
 def get_existing_files(api: HfApi, repo_id: str) -> set:
+    """Get list of files already in the repository."""
+    try:
+        files = api.list_repo_files(repo_id, repo_type="dataset")
+        parquet_files = {f for f in files if f.endswith('.parquet')}
+        logger.info(f"📁 Found {len(parquet_files)} existing parquet files in repo")
+        return parquet_files
+    except Exception as e:
+        logger.warning(f"⚠️ Error checking files, starting from part 1: {e}")
+        return set()
     """Get list of files already in the repository."""
     try:
         files = api.list_repo_files(repo_id, repo_type="dataset")
@@ -472,11 +541,18 @@ def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chu
             if not existing_file:
                 manifest_data['files'].append({
                     'chunk_number': chunk_number,
-                    'remote_name': remote_name
+                    'remote_name': remote_name,
+                    'benchmark': benchmark_name  # Add benchmark info for clarity
                 })
-                logger.info(f"➕ Adding new file to manifest: chunk {chunk_number} -> {remote_name}")
+                logger.info(f"➕ Adding new file to manifest: chunk {chunk_number} -> {remote_name} (benchmark: {benchmark_name})")
             else:
                 logger.info(f"📋 File already in manifest: chunk {chunk_number}")
+                # Check if the remote_name matches - this could indicate a problem
+                if existing_file.get('remote_name') != remote_name:
+                    logger.warning(f"⚠️ Chunk number collision detected! Chunk {chunk_number} maps to different files:")
+                    logger.warning(f"   Existing: {existing_file.get('remote_name')}")
+                    logger.warning(f"   New: {remote_name}")
+                    logger.warning(f"   This indicates a chunk numbering problem!")
         
         # Update metadata
         manifest_data['processed_tasks'] = sorted(list(set(manifest_data['processed_tasks'])))
@@ -591,24 +667,10 @@ def process_with_optimization(args):
         return False
     
     api = setup_hf_api(hf_token, args.repo_id)
-    existing_files = get_existing_files(api, args.repo_id)
     
-    # Determine starting number for both chunk ID and part number
-    # Each chunk becomes one parquet file, so they should be in sync
-    if existing_files:
-        part_numbers = []
-        for f in existing_files:
-            try:
-                if f.startswith('data-') and f.endswith('.parquet'):
-                    num = int(f.split('-')[1].split('.')[0])
-                    part_numbers.append(num)
-            except ValueError:
-                continue
-        start_number = max(part_numbers) + 1 if part_numbers else 1
-    else:
-        start_number = 1
-    
-    logger.info(f"📊 Starting from number {start_number} (both chunk ID and part number)")
+    # Use atomic chunk number assignment to prevent race conditions 
+    # when multiple benchmarks run in parallel
+    start_number = get_next_chunk_number(api, args.repo_id)
     
     # Check for already processed tasks to avoid duplicates (unless skipped)
     processed_tasks = set()
