@@ -28,7 +28,7 @@ class IncrementalStatsCalculator:
         self.processed_shards = 0
         self.total_records = 0
     
-    def update_with_shard(self, shard_df: pd.DataFrame, source_name: str) -> None:
+    def update_with_shard(self, shard_df: pd.DataFrame, source_name: str = None) -> None:
         """Update running statistics with data from a new shard."""
         logger.info(f"📊 Processing shard with {len(shard_df):,} records")
         
@@ -43,6 +43,9 @@ class IncrementalStatsCalculator:
             if len(scores) == 0:
                 continue
             
+            # Extract source from data if available, otherwise use parameter
+            data_source = group['source'].iloc[0] if 'source' in group.columns and not group['source'].isna().all() else (source_name or 'unknown')
+            
             batch_stats = {
                 'count': len(scores),
                 'sum': scores.sum(),
@@ -51,7 +54,7 @@ class IncrementalStatsCalculator:
                 'max_score': scores.max(),
                 'model_family': group['model_family'].iloc[0] if 'model_family' in group else 'unknown',
                 'evaluation_method': group['evaluation_method_name'].iloc[0] if 'evaluation_method_name' in group else 'unknown',
-                'source': source_name,
+                'source': data_source,
                 'dataset_name': dataset_name,
                 'model_name': model_name
             }
@@ -141,15 +144,24 @@ def get_data_shards(api: HfApi, repo_id: str, source_name: str) -> list:
     try:
         files = list_repo_files(repo_id=repo_id, repo_type='dataset')
         
-        # Filter for source-specific parquet files, excluding stats files
-        shard_files = [
-            f for f in files 
-            if f.endswith('.parquet') 
-            and source_name in f 
-            and not f.startswith('stats-')
-        ]
-        
-        logger.info(f"📁 Found {len(shard_files)} data shards for source '{source_name}'")
+        # Filter for parquet files, excluding stats files
+        if source_name == "all":
+            shard_files = [
+                f for f in files 
+                if f.endswith('.parquet') 
+                and not f.startswith('comprehensive_stats')
+                and not f.startswith('stats-')
+            ]
+            logger.info(f"📁 Found {len(shard_files)} data shards for all sources")
+        else:
+            shard_files = [
+                f for f in files 
+                if f.endswith('.parquet') 
+                and source_name in f 
+                and not f.startswith('comprehensive_stats')
+                and not f.startswith('stats-')
+            ]
+            logger.info(f"📁 Found {len(shard_files)} data shards for source '{source_name}'")
         for f in sorted(shard_files):
             logger.info(f"   📄 {f}")
         
@@ -161,7 +173,7 @@ def get_data_shards(api: HfApi, repo_id: str, source_name: str) -> list:
 
 
 def process_shard_incrementally(api: HfApi, repo_id: str, shard_file: str, 
-                               calculator: IncrementalStatsCalculator, source_name: str) -> bool:
+                               calculator: IncrementalStatsCalculator, source_name: str = None) -> bool:
     """Download and process a single shard, updating running statistics."""
     try:
         logger.info(f"⬇️ Processing shard: {shard_file}")
@@ -196,13 +208,49 @@ def process_shard_incrementally(api: HfApi, repo_id: str, shard_file: str,
         return False
 
 
+def get_next_stats_index(api: HfApi, stats_repo_id: str, source_name: str) -> int:
+    """Get the next index number for comprehensive stats files for a specific source."""
+    try:
+        files = list_repo_files(repo_id=stats_repo_id, repo_type='dataset')
+        
+        # Look for existing files with pattern: {source_name}-XXXXX.parquet
+        part_numbers = []
+        prefix = f"{source_name}-" if source_name != "all" else "all-"
+        
+        for f in files:
+            try:
+                if f.startswith(prefix) and f.endswith('.parquet'):
+                    # Extract number from {source}-XXXXX.parquet
+                    num_part = f[len(prefix):].split('.')[0]
+                    num = int(num_part)
+                    part_numbers.append(num)
+            except ValueError:
+                continue
+        
+        next_index = max(part_numbers) + 1 if part_numbers else 1
+        logger.info(f"📊 Found {len(part_numbers)} existing {source_name} stats files, next index: {next_index}")
+        return next_index
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Error checking stats repo files, starting from index 1: {e}")
+        return 1
+
+
 def upload_comprehensive_stats(api: HfApi, stats_df: pd.DataFrame, stats_repo_id: str, 
                               source_name: str, token: str) -> None:
-    """Upload comprehensive statistics to the stats repository."""
+    """Upload comprehensive statistics to the stats repository - one file per source."""
     
-    # Generate filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stats_filename = f"comprehensive_stats_{source_name}_{timestamp}.parquet"
+    total_rows = len(stats_df)
+    logger.info(f"📊 Uploading {total_rows} comprehensive statistics rows for source: {source_name}")
+    
+    # Get next index for this source
+    next_index = get_next_stats_index(api, stats_repo_id, source_name)
+    
+    # Generate filename: {source}-{index}.parquet (e.g., helm-00001.parquet, all-00001.parquet)
+    if source_name == "all":
+        stats_filename = f"all-{next_index:05d}.parquet"
+    else:
+        stats_filename = f"{source_name}-{next_index:05d}.parquet"
     
     # Save to temporary file
     with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp_file:
@@ -226,8 +274,19 @@ def upload_comprehensive_stats(api: HfApi, stats_df: pd.DataFrame, stats_repo_id
         
         logger.info(f"✅ Uploaded comprehensive statistics to {stats_repo_id}")
         
-        # Show top performers
+        # Show summary statistics
         if len(stats_df) > 0:
+            unique_sources = stats_df['source'].nunique() if 'source' in stats_df.columns else 1
+            unique_models = stats_df['model_name'].nunique()
+            unique_datasets = stats_df['dataset_name'].nunique()
+            
+            logger.info(f"📊 Statistics summary:")
+            logger.info(f"   • {unique_sources} source(s)")
+            logger.info(f"   • {unique_models} unique models")
+            logger.info(f"   • {unique_datasets} unique datasets")
+            logger.info(f"   • {len(stats_df)} total combinations")
+            
+            # Show top performers
             logger.info("🏆 Top 5 performers:")
             top_5 = stats_df.nlargest(5, 'accuracy')
             for i, (_, row) in enumerate(top_5.iterrows(), 1):
@@ -243,7 +302,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate comprehensive statistics from all uploaded data")
     parser.add_argument("--main-repo-id", required=True, help="Main dataset repository ID")
     parser.add_argument("--stats-repo-id", required=True, help="Statistics dataset repository ID")
-    parser.add_argument("--source-name", required=True, help="Source name to process (e.g., 'helm')")
+    parser.add_argument("--source-name", required=False, default="all", help="Source name to process (e.g., 'helm') or 'all' for all sources")
     
     args = parser.parse_args()
     
@@ -255,7 +314,10 @@ def main():
     
     try:
         logger.info("🚀 Starting comprehensive statistics generation...")
-        logger.info(f"📊 Source: {args.source_name}")
+        if args.source_name == "all":
+            logger.info("📊 Processing all sources from repository")
+        else:
+            logger.info(f"📊 Source: {args.source_name}")
         logger.info(f"📁 Main repo: {args.main_repo_id}")
         logger.info(f"📈 Stats repo: {args.stats_repo_id}")
         
@@ -275,7 +337,9 @@ def main():
         # Process each shard incrementally
         successful_shards = 0
         for shard_file in shard_files:
-            if process_shard_incrementally(api, args.main_repo_id, shard_file, calculator, args.source_name):
+            # Pass None for source_name if processing all sources (let script extract from data)
+            source_param = None if args.source_name == "all" else args.source_name
+            if process_shard_incrementally(api, args.main_repo_id, shard_file, calculator, source_param):
                 successful_shards += 1
             else:
                 logger.warning(f"⚠️ Skipped failed shard: {shard_file}")
@@ -289,8 +353,23 @@ def main():
         # Finalize statistics
         comprehensive_stats = calculator.finalize_statistics()
         
-        # Upload comprehensive statistics
-        upload_comprehensive_stats(api, comprehensive_stats, args.stats_repo_id, args.source_name, token)
+        if len(comprehensive_stats) == 0:
+            logger.warning("⚠️ No statistics generated")
+            return 0
+        
+        # Upload comprehensive statistics - group by source if processing all
+        if args.source_name == "all" and 'source' in comprehensive_stats.columns:
+            # Group by source and upload separate files
+            sources = comprehensive_stats['source'].unique()
+            logger.info(f"📊 Found {len(sources)} sources in data: {', '.join(sources)}")
+            
+            for source in sources:
+                source_stats = comprehensive_stats[comprehensive_stats['source'] == source]
+                logger.info(f"📤 Uploading {len(source_stats)} stats for source: {source}")
+                upload_comprehensive_stats(api, source_stats, args.stats_repo_id, source, token)
+        else:
+            # Upload single file for specific source
+            upload_comprehensive_stats(api, comprehensive_stats, args.stats_repo_id, args.source_name, token)
         
         logger.info("🎉 Comprehensive statistics generation complete!")
         return 0

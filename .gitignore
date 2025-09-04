@@ -1,6 +1,9 @@
 # Data directories
 /data/
 
+# But allow test examples
+!/tests/examples/
+
 # Log files
 *.log
 
@@ -12,9 +15,12 @@
 performance_*.txt
 performance_*.json
 
-# Demo and test files
+# Demo files
 demo_*.py
-test_*.py
+
+# Test-specific temporary files (tests directory is tracked)
+tests/temp_*
+tests/test_output/
 
 # Byte-compiled / cache
 __pycache__/

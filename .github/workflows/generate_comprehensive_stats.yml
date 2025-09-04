@@ -1,16 +1,11 @@
-name: Generate Comprehensive Statistics
+name: Generate Comprehensive Statistics (Standalone)
 
 on:
   schedule:
-    # Daily at 06:00 UTC (after weekly data processing completes)
+    # Daily at 06:00 UTC (fallback if post-scrape stats fail)
     - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
-      source_name:
-        description: 'Source name to process (e.g., helm, eval_harness)'
-        required: false
-        default: 'helm'
-        type: string
       force_regenerate:
         description: 'Force regenerate even if recent stats exist'
         required: false
@@ -19,7 +14,7 @@ on:
 
 jobs:
   generate_comprehensive_stats:
-    name: Generate Comprehensive Statistics from All Data
+    name: Generate Comprehensive Statistics (Standalone/Fallback)
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -46,20 +41,16 @@ jobs:
           # Generate comprehensive statistics by downloading and processing
           # all data shards incrementally to avoid memory issues
           
-          SOURCE_NAME="${{ github.event.inputs.source_name || 'helm' }}"
-          
-          echo "🚀 Starting comprehensive statistics generation for source: $SOURCE_NAME"
-          echo "� Started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          echo "🚀 Starting comprehensive statistics generation for all sources"
+          echo "📝 Note: This is a fallback workflow - stats are now generated automatically after scraping"
+          echo "📅 Started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           echo "🖥️  Runner: ${{ runner.os }}"
-          echo "�📊 This will process all uploaded data shards incrementally"
+          echo "📊 This will process all uploaded data shards incrementally"
           echo "⚡ Memory efficient: processes one shard at a time"
           
           python scripts/generate_comprehensive_stats.py \
             --main-repo-id evaleval/every_eval_ever \
-            --stats-repo-id evaleval/every_eval_score_ever \
-            --source-name "$SOURCE_NAME" \
-            --shard-size 10000 \
-            --max-workers 4
+            --stats-repo-id evaleval/every_eval_score_ever
           
           echo "📅 Completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
 
@@ -84,13 +75,13 @@ jobs:
                   repo_type='dataset'
               )
               
-              # Look for recent comprehensive stats files
-              stats_files = [f for f in files if 'comprehensive_stats' in f]
+              # Look for stats files with new naming pattern: {source}-{index}.parquet
+              stats_files = [f for f in files if f.endswith('.parquet') and '-' in f]
               
               if stats_files:
                   print(f'✅ Found {len(stats_files)} comprehensive statistics files')
                   print('📁 Recent stats files:')
-                  for f in sorted(stats_files)[-3:]:  # Show last 3
+                  for f in sorted(stats_files)[-5:]:  # Show last 5
                       print(f'   📄 {f}')
               else:
                   print('⚠️ No comprehensive statistics files found')

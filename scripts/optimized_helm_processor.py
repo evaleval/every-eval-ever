@@ -97,7 +97,7 @@ def read_tasks_chunked(csv_file: str, chunk_size: int, adapter_method: str = Non
         raise
 
 
-def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_minutes: int = 60) -> str:
+def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_minutes: int = 60, benchmark: str = "unknown") -> str:
     """Process a chunk of tasks and return the output file path."""
     logger.info(f"🔄 Processing chunk {chunk_id} with {len(chunk_tasks)} tasks")
     logger.info(f"⏱️ Timeout: {timeout_minutes} minutes per chunk")
@@ -117,21 +117,35 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
         logger.info(f"🔄 Processing task {i}/{len(chunk_tasks)}: {task}")
         
         try:
-            # Call the HELM processor function directly
-            output_file = process_line(task)
+            # Call the HELM processor function directly with required arguments
+            result = process_line(
+                line=task,
+                output_dir=str(chunk_dir),
+                benchmark="lite",  # Use a default benchmark name
+                downloads_dir="data/downloads",
+                keep_temp_files=False,
+                overwrite=False,
+                show_progress=False  # Disable progress bar for cleaner logs
+            )
             
-            if output_file and Path(output_file).exists():
-                # Read the file to count entries
-                try:
-                    df = pd.read_csv(output_file)
-                    entry_count = len(df)
-                    logger.info(f"✅ Task {i} completed: {entry_count} entries")
-                    processed_files.append(output_file)
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not count entries in {output_file}: {e}")
-                    processed_files.append(output_file)
+            if result and result.get("status") == "success":
+                output_file = result.get("converted_file")  # Use 'converted_file' not 'output_file'
+                if output_file and Path(output_file).exists():
+                    # Read the file to count entries
+                    try:
+                        df = pd.read_csv(output_file)
+                        entry_count = len(df)
+                        logger.info(f"✅ Task {i} completed: {entry_count} entries")
+                        processed_files.append(output_file)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not count entries in {output_file}: {e}")
+                        processed_files.append(output_file)
+                else:
+                    logger.error(f"❌ Task {i} failed: no output file generated")
             else:
-                logger.error(f"❌ Task {i} failed: no output file generated")
+                status = result.get("status", "unknown") if result else "no result"
+                error = result.get("error", "no error details") if result else "no result"
+                logger.error(f"❌ Task {i} failed with status: {status}, error: {error}")
                 
         except Exception as e:
             logger.error(f"❌ Task {i} failed with error: {e}")
@@ -158,6 +172,18 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
             start_time = time.time()
             combined_df = pd.concat(combined_data, ignore_index=True)
             
+            # Add metadata fields
+            import datetime
+            combined_df['source'] = 'helm'
+            combined_df['benchmark'] = benchmark  
+            combined_df['timestamp'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
+            combined_df['processing_date'] = datetime.datetime.now().strftime('%Y-%m-%d')
+            
+            # Reorder columns to put metadata first
+            metadata_cols = ['source', 'benchmark', 'timestamp', 'processing_date']
+            other_cols = [col for col in combined_df.columns if col not in metadata_cols]
+            combined_df = combined_df[metadata_cols + other_cols]
+            
             # Create aggregated directory
             agg_dir = Path("data/aggregated")
             agg_dir.mkdir(parents=True, exist_ok=True)
@@ -177,7 +203,7 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
         return None
 
 
-def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, part_num: int) -> bool:
+def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, part_num: int, cleanup: bool = True) -> bool:
     """Upload a file to HuggingFace and clean up local file."""
     try:
         file_path = Path(local_path)
@@ -202,9 +228,12 @@ def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, par
         speed_mbps = file_size_mb / max(upload_time, 0.001)
         logger.info(f"✅ Uploaded {remote_name} in {upload_time:.1f}s ({speed_mbps:.1f}MB/s)")
         
-        # Clean up local file
-        file_path.unlink()
-        logger.info(f"🧹 Cleaned up local file: {local_path}")
+        # Clean up local file if cleanup is enabled
+        if cleanup:
+            file_path.unlink()
+            logger.info(f"🧹 Cleaned up local file: {local_path}")
+        else:
+            logger.info(f"📁 Preserved local file: {local_path}")
         
         return True
     except Exception as e:
@@ -213,8 +242,28 @@ def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, par
 
 
 def process_with_optimization(args):
-    """Main processing function with chunked optimization."""
+    """
+    Main processing function with chunked optimization.
+    
+    This function is designed to be cronjob-friendly:
+    - Chunk numbering is determined by existing files in the HF dataset
+    - Each run continues from where the previous run left off
+    - Local chunk directories use the same numbering as HF dataset files
+    - Example: If HF has data-00001.parquet, data-00002.parquet, 
+      next run will create chunk_0003 and upload as data-00003.parquet
+    """
     logger.info("🚀 Starting optimized processing")
+    
+    # Determine benchmark name from args or CSV file path
+    if args.benchmark:
+        benchmark_name = args.benchmark
+    else:
+        # Extract benchmark name from CSV file path (e.g., "helm_lite.csv" -> "lite")
+        csv_filename = Path(args.csv_file).stem
+        if csv_filename.startswith('helm_'):
+            benchmark_name = csv_filename[5:]  # Remove "helm_" prefix
+        else:
+            benchmark_name = "unknown"
     
     # Setup HuggingFace API
     hf_token = os.getenv('HF_TOKEN')
@@ -225,7 +274,8 @@ def process_with_optimization(args):
     api = setup_hf_api(hf_token, args.repo_id)
     existing_files = get_existing_files(api, args.repo_id)
     
-    # Determine starting part number
+    # Determine starting number for both chunk ID and part number
+    # Each chunk becomes one parquet file, so they should be in sync
     if existing_files:
         part_numbers = []
         for f in existing_files:
@@ -235,11 +285,11 @@ def process_with_optimization(args):
                     part_numbers.append(num)
             except ValueError:
                 continue
-        start_part = max(part_numbers) + 1 if part_numbers else 1
+        start_number = max(part_numbers) + 1 if part_numbers else 1
     else:
-        start_part = 1
+        start_number = 1
     
-    logger.info(f"📊 Starting from part {start_part}")
+    logger.info(f"📊 Starting from number {start_number} (both chunk ID and part number)")
     
     # Read and chunk tasks
     task_chunks = read_tasks_chunked(args.csv_file, args.chunk_size, args.adapter_method)
@@ -260,23 +310,23 @@ def process_with_optimization(args):
     upload_executor = ThreadPoolExecutor(max_workers=args.upload_workers)
     upload_futures = []
     successful_uploads = 0
-    part_counter = start_part
+    # Use the same counter for both chunk ID and part number since they're in sync
+    current_number = start_number
     
     start_time = time.time()
     
     for chunk_idx, chunk_tasks in enumerate(task_chunks, 1):
-        logger.info(f"\n--- Chunk {chunk_idx}/{len(task_chunks)} ---")
+        logger.info(f"\n--- Chunk {chunk_idx}/{len(task_chunks)} (ID: {current_number}) ---")
         
-        # Process chunk
-        chunk_file = process_chunk(chunk_tasks, chunk_idx, args.max_workers, args.timeout)
+        # Process chunk with incremental chunk ID
+        chunk_file = process_chunk(chunk_tasks, current_number, args.max_workers, args.timeout, benchmark_name)
         
         if chunk_file:
             # Submit upload task
             upload_future = upload_executor.submit(
-                upload_file, api, chunk_file, args.repo_id, args.source_name, part_counter
+                upload_file, api, chunk_file, args.repo_id, args.source_name, current_number, not args.no_cleanup
             )
             upload_futures.append(upload_future)
-            part_counter += 1
             
             # Update progress
             elapsed = time.time() - start_time
@@ -286,7 +336,10 @@ def process_with_optimization(args):
             
             logger.info(f"📈 Progress: {chunk_idx}/{len(task_chunks)} chunks ({progress*100:.1f}%) | ~{total_entries} entries | ETA: {eta_minutes:.1f}min")
         else:
-            logger.error(f"❌ Chunk {chunk_idx} failed")
+            logger.error(f"❌ Chunk {current_number} failed")
+        
+        # Increment number for next iteration
+        current_number += 1
     
     # Wait for all uploads to complete
     logger.info(f"\n⏳ Waiting for {len(upload_futures)} uploads to complete...")
@@ -322,6 +375,7 @@ def main():
     parser.add_argument("--repo-id", type=str, required=True, help="HuggingFace dataset repository ID")
     parser.add_argument("--source-name", type=str, default="helm", help="Source name for file organization")
     parser.add_argument("--adapter-method", type=str, help="Filter tasks by adapter method")
+    parser.add_argument("--no-cleanup", action="store_true", help="Don't clean up parquet files after upload (for testing)")
     
     args = parser.parse_args()
     
