@@ -82,7 +82,17 @@ def read_tasks_chunked(csv_file: str, chunk_size: int, adapter_method: str = Non
     """Read tasks from CSV and split into chunks."""
     try:
         df = pd.read_csv(csv_file)
-        tasks = df['task'].tolist()
+        
+        # Check which column contains the task identifiers
+        if 'task' in df.columns:
+            tasks = df['task'].tolist()
+        elif 'Run' in df.columns:
+            # HELM web scraper creates 'Run' column with task identifiers
+            tasks = df['Run'].tolist()
+        else:
+            # Fallback: use the first column
+            tasks = df.iloc[:, 0].tolist()
+            logger.warning(f"⚠️ No 'task' or 'Run' column found, using first column: {df.columns[0]}")
         
         # Filter by adapter method if specified
         if adapter_method:
