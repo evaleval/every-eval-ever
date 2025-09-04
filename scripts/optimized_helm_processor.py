@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -667,6 +668,22 @@ def process_with_optimization(args):
                 )
                 upload_futures.append((chunk_number, upload_future))
                 logger.info(f"📤 Upload future created for chunk {chunk_number}, total pending uploads: {len(upload_futures)}")
+                
+                # Start a background thread to update manifest when this upload completes
+                def update_manifest_on_upload_complete():
+                    try:
+                        remote_name = upload_future.result()  # Wait for upload to complete
+                        if remote_name:
+                            logger.info(f"� Updating manifest for completed upload: chunk {chunk_number} -> {remote_name}")
+                            # Update manifest immediately with upload info
+                            update_manifest_incremental(benchmark_name, chunk_tasks_for_manifest, chunk_number, 
+                                                       remote_name=remote_name, api=api, repo_id=args.repo_id)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to update manifest for chunk {chunk_number}: {e}")
+                
+                # Run manifest update in background thread
+                manifest_thread = threading.Thread(target=update_manifest_on_upload_complete, daemon=True)
+                manifest_thread.start()
                 
                 # Update progress with detailed metrics
                 elapsed = time.time() - start_time
