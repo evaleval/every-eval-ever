@@ -259,8 +259,11 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
     processed_files = []
     task_file_mapping = {}  # Track which task produced which file
     
-    # Process each task in the chunk
-    for i, task in enumerate(chunk_tasks, 1):
+    # Process tasks with parallel execution (but limited to avoid overwhelming the system)
+    max_parallel = min(workers, 4)  # Limit to 4 concurrent downloads to avoid rate limits
+    
+    def process_single_task(task_info):
+        i, task = task_info
         logger.info(f"🔄 Processing task {i}/{len(chunk_tasks)}: {task}")
         
         try:
@@ -283,23 +286,33 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
                         df = pd.read_csv(output_file)
                         entry_count = len(df)
                         logger.info(f"✅ Task {i} completed: {entry_count} entries")
-                        processed_files.append(output_file)
-                        # Store the actual HELM task/run name for proper task_id assignment
-                        task_file_mapping[output_file] = task  # task is the HELM run name like "openai_gpt-3.5-turbo:openbookqa:1"
+                        return output_file, task
                     except Exception as e:
                         logger.warning(f"⚠️ Could not count entries in {output_file}: {e}")
-                        processed_files.append(output_file)
-                        task_file_mapping[output_file] = task
+                        return output_file, task
                 else:
                     logger.error(f"❌ Task {i} failed: no output file generated")
+                    return None, task
             else:
                 status = result.get("status", "unknown") if result else "no result"
                 error = result.get("error", "no error details") if result else "no result"
                 logger.error(f"❌ Task {i} failed with status: {status}, error: {error}")
+                return None, task
                 
         except Exception as e:
             logger.error(f"❌ Task {i} failed with error: {e}")
-            continue
+            return None, task
+    
+    # Process tasks with ThreadPoolExecutor for better control
+    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+        task_infos = [(i+1, task) for i, task in enumerate(chunk_tasks)]
+        results = list(executor.map(process_single_task, task_infos))
+    
+    # Collect successful results
+    for output_file, task in results:
+        if output_file:
+            processed_files.append(output_file)
+            task_file_mapping[output_file] = task
     
     logger.info(f"📊 Chunk {chunk_id} summary: {len(processed_files)}/{len(chunk_tasks)} tasks successful")
     
@@ -547,11 +560,17 @@ def process_with_optimization(args):
     completed_chunks = 0
     for chunk_idx, chunk_future, chunk_number in chunk_futures:
         try:
-            chunk_file = chunk_future.result()  # Wait for this chunk to complete
+            logger.info(f"⏳ Waiting for chunk {chunk_idx+1} (ID: {chunk_number}) to complete...")
+            
+            # Add timeout to chunk processing
+            chunk_file = chunk_future.result(timeout=args.timeout * 60)  # Convert minutes to seconds
             completed_chunks += 1
             
             if chunk_file:
+                logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed successfully: {chunk_file}")
+                
                 # Submit upload task immediately
+                logger.info(f"☁️ Submitting chunk {chunk_number} for upload...")
                 upload_future = upload_executor.submit(
                     upload_file, api, chunk_file, args.repo_id, args.source_name, chunk_number, not args.no_cleanup
                 )
@@ -565,12 +584,14 @@ def process_with_optimization(args):
                 total_entries = completed_chunks * args.chunk_size  # Approximate
                 processing_rate = total_entries / elapsed if elapsed > 0 else 0
                 
-                logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed")
+                logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed and submitted for upload")
                 logger.info(f"📈 Progress: {completed_chunks}/{len(task_chunks)} chunks ({progress:.1%}) | ~{total_entries:,} entries")
                 logger.info(f"⏱️ Elapsed: {elapsed_minutes:.1f}min | ETA: {eta_minutes:.1f}min | Rate: {processing_rate:.0f} entries/sec")
             else:
-                logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed")
+                logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed: no output file generated")
                 
+        except TimeoutError:
+            logger.error(f"⏰ Chunk {chunk_idx+1} (ID: {chunk_number}) timed out after {args.timeout} minutes")
         except Exception as e:
             logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed with error: {e}")
     
@@ -581,14 +602,22 @@ def process_with_optimization(args):
     logger.info(f"\n⏳ Waiting for {len(upload_futures)} uploads to complete...")
     # Wait for all uploads and collect remote names
     for chunk_number, future in upload_futures:
-        remote_name = future.result()
-        if remote_name:
-            successful_uploads += 1
-            uploaded_remote_names.append({
-                'chunk_number': chunk_number,
-                'remote_name': remote_name
-            })
-    
+        try:
+            logger.info(f"⏳ Waiting for upload of chunk {chunk_number}...")
+            remote_name = future.result(timeout=300)  # 5 minute timeout per upload
+            if remote_name:
+                successful_uploads += 1
+                uploaded_remote_names.append({
+                    'chunk_number': chunk_number,
+                    'remote_name': remote_name
+                })
+                logger.info(f"✅ Successfully uploaded chunk {chunk_number} as {remote_name}")
+            else:
+                logger.error(f"❌ Upload failed for chunk {chunk_number}: no remote name returned")
+        except TimeoutError:
+            logger.error(f"⏰ Upload timeout for chunk {chunk_number} after 5 minutes")
+        except Exception as e:
+            logger.error(f"❌ Upload failed for chunk {chunk_number}: {e}")
     upload_executor.shutdown(wait=True)
     
     total_time = time.time() - start_time
