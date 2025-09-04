@@ -7,7 +7,65 @@ A comprehensive, extensible data pipeline for collecting, processing, and servin
 - [🚀 Quick Start](#-quick-start)
 - [📋 How This Repository Works](#-how-this-repository-works)  
 - [🧩 Supported Sources](#-supported-sources)
-- [📊 Data Pipeline Overview](#-data-pipeline-overview)
+- [📊 Data Pipeline Overvi## 📈 Usage Examples
+
+### Research Analysis
+```python
+from datasets import load_dataset
+import pandas as pd
+
+# Load the detailed evaluation dataset
+dataset = load_dataset("evaleval/every_eval_ever", streaming=True)
+
+# Convert to pandas for analysis
+df = pd.DataFrame(dataset['train'])
+
+# Analyze model performance on specific tasks
+task_performance = df.groupby(['model_name', 'dataset_name'])['evaluation_score'].mean()
+print(task_performance)
+```
+
+### Quick Statistics Access
+```python
+from datasets import load_dataset
+
+# Load the comprehensive statistics dataset
+stats = load_dataset("evaleval/every_eval_score_ever")
+stats_df = pd.DataFrame(stats['train'])
+
+# View top models across all benchmarks
+top_models = stats_df.groupby('model_name')['evaluation_score'].mean().sort_values(ascending=False).head(10)
+print(top_models)
+```
+
+## 🔧 Contributing
+
+### Adding New Data Sources
+
+1. **Create a new processor** in `src/core/your_source_name/`
+2. **Add dataset mapping** in `config/dataset_mappings.json`
+3. **Create processing script** following `scripts/optimized_helm_processor.py` pattern
+4. **Update workflows** to include your source in automated processing
+5. **Test with examples** in `tests/` directory
+
+### Development Workflow
+
+```bash
+# Set up development environment
+git clone https://github.com/yourusername/every-eval-ever.git
+cd every-eval-ever
+pip install -r requirements.txt
+
+# Run code quality checks
+black . && isort .
+mypy src/
+
+# Test processing pipeline
+python scripts/optimized_helm_processor.py
+
+# Generate test statistics
+python scripts/generate_comprehensive_stats.py
+```line-overview)
 - [⚙️ Configuration](#️-configuration)
 - [🤖 Automation](#-automation)
 - [🔧 Adding New Data Sources](#-adding-new-data-sources)
@@ -35,18 +93,24 @@ playwright install
 
 ### Basic Usage
 ```bash
-# Process HELM data for the lite benchmark (fastest for testing)
-python main.py helm --benchmark lite
+# The main processing is now automated via GitHub Actions
+# But you can still run components manually for testing:
 
-# Process other HELM benchmarks
-python main.py helm --benchmark mmlu
-python main.py helm --benchmark classic
+# Test HELM web scraping for a specific benchmark
+python -m src.core.helm.web_scraper lite
 
-# Process with more parallelism
-python main.py helm --benchmark lite --max-workers 8
+# Run optimized HELM processing (chunked, with uploads)
+python scripts/optimized_helm_processor.py \
+  --benchmark lite \
+  --chunk-size 200 \
+  --max-workers 2 \
+  --repo-id evaleval/every_eval_ever \
+  --source-name helm
 
-# Keep temporary files for debugging
-python main.py helm --benchmark lite --keep-temp --verbose
+# Generate comprehensive statistics from uploaded data
+python scripts/generate_comprehensive_stats.py \
+  --main-repo-id evaleval/every_eval_ever \
+  --stats-repo-id evaleval/every_eval_score_ever
 ```
 
 ### Accessing Processed Data
@@ -68,21 +132,24 @@ helm_data = dataset.filter(lambda x: x['source'] == 'helm')
 
 #### Comprehensive Statistics (Leaderboard Data)
 ```python
-# Load benchmark-model performance statistics
+# Load benchmark-model performance statistics with smart indexing
 stats_dataset = load_dataset("evaleval/every_eval_score_ever")
+
+# Files are organized by source with smart indexing:
+# helm-00001.parquet, helm-00002.parquet, eval_harness-00001.parquet, etc.
 
 # Get top performers across all benchmarks
 top_performers = stats_dataset['train'].sort('accuracy', reverse=True)
 
-# Filter for specific benchmarks
+# Filter for specific datasets
 gsm8k_stats = stats_dataset['train'].filter(lambda x: x['dataset_name'] == 'gsm8kscenario')
 ```
 
 #### Data Overview
-- **`evaleval/every_eval_ever`**: Detailed individual evaluation records (~50MB per benchmark)
-- **`evaleval/every_eval_score_ever`**: Comprehensive benchmark-model statistics (~16KB total)
-- **Update Frequency**: Data weekly, statistics daily
-- **Schema**: Standardized across all evaluation sources
+- **`evaleval/every_eval_ever`**: Detailed individual evaluation records with smart chunking (`data-00001.parquet`, `data-00002.parquet`, etc.)
+- **`evaleval/every_eval_score_ever`**: Comprehensive benchmark-model statistics with per-source indexing (`helm-00001.parquet`, etc.)
+- **Update Frequency**: Data processed weekly with immediate comprehensive stats generation
+- **Schema**: Standardized across all evaluation sources with rich metadata
 
 ## 📋 How This Repository Works
 
@@ -91,54 +158,67 @@ Each evaluation source (like HELM) has its own processing pipeline while sharing
 
 ```
 src/
-├── sources/                    # Source-specific processors
-│   └── helm/                  # HELM evaluation data
-│       ├── processor.py       # Main processing entry point
-│       ├── web_scraper.py     # Scrapes HELM website for tasks
-│       ├── downloader.py      # Downloads evaluation files
-│       └── converter.py       # Converts to standardized format
 ├── core/                      # Shared processing utilities
 │   ├── aggregator.py         # Combines data into Parquet shards
-│   └── converter.py          # Base conversion utilities
-└── utils/                     # Common utility functions
+│   ├── converter.py          # Base conversion utilities
+│   ├── scrape_all_to_parquet.py  # Main processing orchestrator
+│   └── helm/                 # HELM-specific processing
+│       ├── downloader.py     # Downloads evaluation files
+│       └── web_scraper.py    # Scrapes HELM website for tasks
+├── utils/                     # Common utility functions
+│   ├── data_loading.py       # Data loading and saving utilities
+│   ├── evaluation_utils.py   # Evaluation processing helpers
+│   └── model_utils.py        # Model metadata handling
+└── scripts/                   # Automation and workflow scripts
+    ├── optimized_helm_processor.py      # Main HELM processing pipeline
+    └── generate_comprehensive_stats.py  # Statistics generation
 ```
 
-### 2. **Unified Command Interface**
-All sources are accessed through a single entry point:
+### 2. **Optimized Processing Interface**
+The system uses an optimized chunked processing approach:
 
 ```bash
-python main.py {source_name} [options]
-```
+# Optimized HELM processor with chunking and parallel uploads
+python scripts/optimized_helm_processor.py \
+  --benchmark {lite|mmlu|classic} \
+  --chunk-size 200 \
+  --max-workers 2 \
+  --repo-id evaleval/every_eval_ever \
+  --source-name helm
 
-Examples:
-- `python main.py helm --benchmark lite`
-- `python main.py openai_evals --dataset hellaswag` (future)
-- `python main.py bigbench --subset reasoning` (future)
+# Comprehensive statistics generation (processes all sources)
+python scripts/generate_comprehensive_stats.py \
+  --main-repo-id evaleval/every_eval_ever \
+  --stats-repo-id evaleval/every_eval_score_ever
+```
 
 ### 3. **Standardized Output Schema**
 All sources produce data with the same schema for consistency:
 
 ```
 evaluation_id          # Unique identifier
-dataset_name           # Name of the dataset/task
+dataset_name           # Name of the dataset/task  
 model_name            # Model being evaluated
+model_family          # Model family/organization
 raw_input             # Input text/prompt
 ground_truth          # Expected answer
 output                # Model's actual output
-evaluation_score      # Numerical score
+evaluation_score      # Numerical score (0.0-1.0)
+evaluation_method_name # Method used for evaluation
 source                # Source name (e.g., 'helm')
-ingestion_timestamp   # When processed
-# ... additional fields
+benchmark             # Benchmark category
+hf_split              # HuggingFace dataset split
+hf_index              # Index within the split
+processing_date       # Date of processing (YYYY-MM-DD)
+timestamp             # Processing timestamp
+# ... additional metadata fields
 ```
 
-### 4. **Automated Dual-Dataset Processing**
-GitHub Actions automatically:
-- Runs weekly data collection and processing
-- Creates detailed evaluation records in Parquet shards
-- Uploads to `evaleval/every_eval_ever` with incremental updates
-- Generates comprehensive statistics daily via incremental processing
-- Uploads leaderboard data to `evaleval/every_eval_score_ever`
-- Provides both granular data and aggregated insights
+### 4. **Automated Processing**
+- **Weekly Scraping**: GitHub Actions workflow runs weekly to scrape latest data
+- **Smart Indexing**: Automatically detects existing files and continues numbering (data-0001.parquet, data-0002.parquet, etc.)
+- **Comprehensive Statistics**: After each scraping run, generates per-model-per-benchmark-per-dataset statistics
+- **Error Handling**: Robust error handling and retry mechanisms for reliable processing
 
 ## 🧩 Supported Sources
 
@@ -152,11 +232,11 @@ Stanford's comprehensive language model evaluation framework.
 
 **Example Usage:**
 ```bash
-# Quick test with lite benchmark
-python main.py helm --benchmark lite
+# Process HELM data with optimized chunked approach
+python scripts/optimized_helm_processor.py
 
-# Full MMLU evaluation
-python main.py helm --benchmark mmlu --max-workers 4
+# Generate comprehensive statistics  
+python scripts/generate_comprehensive_stats.py
 ```
 
 ## 📊 Data Pipeline Overview
@@ -224,13 +304,11 @@ The repository uses **dual workflow architecture** for optimal modularity and re
 For custom processing or testing:
 
 ```bash
-# Run the data processing pipeline locally
-python scripts/incremental_upload.py \
-  --repo-id your-org/your-dataset \
-  --stats-repo-id your-org/your-stats-dataset \
-  --benchmarks lite mmlu classic \
-  --source-name helm \
-  --max-workers 2
+# Run the optimized HELM processing pipeline locally
+python scripts/optimized_helm_processor.py
+
+# Generate comprehensive statistics for all sources
+python scripts/generate_comprehensive_stats.py
 ```
 
 ### Manual Statistics Generation
@@ -238,10 +316,7 @@ For generating comprehensive statistics:
 
 ```bash
 # Generate comprehensive statistics from all uploaded data
-python scripts/generate_comprehensive_stats.py \
-  --main-repo-id evaleval/every_eval_ever \
-  --stats-repo-id evaleval/every_eval_score_ever \
-  --source-name helm
+python scripts/generate_comprehensive_stats.py
 ```
 
 ## 🔧 Adding New Data Sources
@@ -251,19 +326,17 @@ This repository is designed to make adding new evaluation sources straightforwar
 ### Step 1: Create Source Directory Structure
 ```bash
 # Create the new source directory
-mkdir src/sources/{your_source_name}
-cd src/sources/{your_source_name}
+mkdir src/core/{your_source_name}
+cd src/core/{your_source_name}
 
 # Create required files
 touch __init__.py
-touch processor.py      # Main entry point (required)
+touch downloader.py    # Data downloading and processing
 touch web_scraper.py   # Website scraping (if needed)
-touch downloader.py    # Data downloading (if needed)  
-touch converter.py     # Data conversion (if needed)
 ```
 
 ### Step 2: Implement Core Processor
-Create `src/sources/{your_source_name}/processor.py`:
+Create `src/core/{your_source_name}/downloader.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -271,13 +344,30 @@ Create `src/sources/{your_source_name}/processor.py`:
 {Your Source Name} evaluation data processor.
 """
 
-import argparse
 import logging
 from pathlib import Path
 
 # Import shared utilities
 from src.utils.data_loading import save_to_parquet
 from src.utils.evaluation_utils import standardize_evaluation_data
+
+def process_source_data():
+    """Main processing function for {your_source_name}."""
+    try:
+        # Your processing logic here
+        logger.info(f"Processing {your_source_name} data...")
+        
+        # 1. Scrape/discover available evaluations
+        # 2. Download raw data
+        # 3. Convert to standard schema
+        # 4. Save as Parquet with smart indexing
+        
+        logger.info("✅ Processing completed successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Processing failed: {e}")
+        raise
+```
 
 logger = logging.getLogger(__name__)
 
@@ -319,47 +409,9 @@ def main():
     except Exception as e:
         logger.error(f"❌ Processing failed: {e}")
         raise
-
-if __name__ == "__main__":
-    main()
 ```
 
-### Step 3: Add Source to Main Router
-Edit `main.py` to include your new source:
-
-```python
-# Add to SUPPORTED_SOURCES at the top
-SUPPORTED_SOURCES = {
-    'helm': 'src.sources.helm.processor',
-    'your_source_name': 'src.sources.your_source_name.processor',  # Add this line
-}
-```
-
-### Step 4: Create Documentation
-Create `docs/{YOUR_SOURCE_NAME}.md` with:
-
-```markdown
-# {Your Source Name} Data Source
-
-Description of your evaluation source...
-
-## Quick Start
-```bash
-python main.py your_source_name --benchmark example
-```
-
-## Available Benchmarks
-- `benchmark1`: Description
-- `benchmark2`: Description
-
-## Data Pipeline Details
-Explain your specific processing steps...
-
-## Common Issues and Solutions
-Document troubleshooting steps...
-```
-
-### Step 5: Update Configuration
+### Step 3: Add Configuration
 Add your source to `config/dataset_mappings.json`:
 
 ```json
@@ -368,54 +420,20 @@ Add your source to `config/dataset_mappings.json`:
     "field_mappings": {
       "source_field_name": "standard_field_name"
     },
-    "default_values": {
-      "source": "your_source_name",
-      "license": "your_license"
-    }
+    "evaluation_methods": ["method1", "method2"],
+    "default_benchmark": "default_name"
   }
 }
 ```
 
-### Step 6: Add to Automation
-Update `scripts/incremental_upload.py` to support your source:
+### Step 4: Create Processing Script
+Create `scripts/your_source_processor.py` following the pattern of `scripts/optimized_helm_processor.py`.
 
-```python
-# In main() function, modify the supported sources check
-SUPPORTED_SOURCES = ['helm', 'your_source_name']
-```
+### Step 5: Update Workflows
+Add your source to `.github/workflows/scrape_and_upload.yml` to include it in automated processing.
 
-Update both GitHub Actions workflows to include your source:
-
-```yaml
-# In .github/workflows/scrape_and_upload.yml (Data Processing)
-- name: Process evaluation data and upload to HuggingFace
-  run: |
-    python scripts/incremental_upload.py \
-      --repo-id evaleval/every_eval_ever \
-      --stats-repo-id evaleval/every_eval_score_ever \
-      --benchmarks your_benchmark1 your_benchmark2 \
-      --source-name your_source_name
-
-# In .github/workflows/generate_comprehensive_stats.yml (Statistics)
-- name: Generate comprehensive statistics
-  run: |
-    python scripts/generate_comprehensive_stats.py \
-      --main-repo-id evaleval/every_eval_ever \
-      --stats-repo-id evaleval/every_eval_score_ever \
-      --source-name your_source_name
-```
-
-**Note**: The dual workflow architecture automatically handles your new source:
-- **Data workflow**: Processes and uploads your detailed evaluation data
-- **Stats workflow**: Includes your data in comprehensive statistics generation
-
-### Step 7: Test Your Integration
-```bash
-# Test basic functionality
-python main.py your_source_name --help
-
-# Test with small dataset
-python main.py your_source_name --benchmark test --verbose
+### Step 6: Add Tests
+Create test files in `tests/` directory to validate your source processing.
 
 # Test automation script
 python scripts/incremental_upload.py \
@@ -479,53 +497,25 @@ python main.py openai_evals --help
 
 ## 💻 Development
 
-### Local Development
-```bash
-# Install development dependencies
-pip install -r requirements.txt
-pip install -e .  # Install in development mode
+### Testing and Debugging
 
+```bash
 # Run tests
 python -m pytest tests/ -v
 
-# Check code style
-black . && isort .
+# Test processing components individually
+python -c "from src.core.helm.web_scraper import main; main()"
+python -c "from src.core.helm.downloader import main; main()"
 
-# Type checking
-mypy src/
-
-# Process specific benchmark for testing
-python main.py helm --benchmark lite --max-workers 4 --verbose
-
-# Local incremental processing (without upload)
-python scripts/incremental_upload.py \
-  --benchmarks lite \
-  --source-name helm \
-  --max-workers 2 \
-  --repo-id test/dataset
-```
-
-### Testing Individual Components
-For debugging specific parts of the pipeline:
-
-```bash
-# Test HELM web scraper
-python -m src.sources.helm.web_scraper --benchmark test
-
-# Test HELM downloader with specific task
-python -m src.sources.helm.downloader --task sample_task
-
-# Test converter with sample data
-python -m src.sources.helm.converter \
-  --input data/downloads/sample \
-  --output test.csv
+# Debug with verbose logging
+python scripts/optimized_helm_processor.py  # Already includes detailed logging
 ```
 
 ### Debugging Tips
-1. **Use `--verbose`** for detailed logging
-2. **Use `--keep-temp`** to inspect intermediate files
-3. **Use `--max-workers 1`** to avoid parallel processing issues
-4. **Check logs** in `{source}_processor.log` files
+1. **Check logs** in `helm_processor.log` for detailed processing information
+2. **Use test data** in `tests/` directory for validation
+3. **Monitor GitHub Actions** workflows for automated processing status
+4. **Verify outputs** in HuggingFace datasets for data quality
 
 ## 📈 Usage Examples
 
@@ -587,9 +577,6 @@ plt.legend()
 plt.title('Model Performance Over Time')
 plt.xlabel('Date')
 plt.ylabel('Average Evaluation Score')
-plt.show()
-```
-
 ## 🛠️ Output Format
 
 The processed data is delivered through **two complementary datasets** optimized for different use cases:
@@ -598,45 +585,42 @@ The processed data is delivered through **two complementary datasets** optimized
 
 **Purpose**: Individual evaluation instances for deep analysis and research
 
-#### File Naming Convention
+#### File Naming Convention with Smart Indexing
 ```
-helm_lite_part_001.parquet       # HELM lite benchmark, part 1
-helm_mmlu_part_002.parquet       # HELM mmlu benchmark, part 2  
-helm_classic_part_003.parquet    # HELM classic benchmark, part 3
-stats-helm_lite_part_001.parquet # Per-shard statistics
+data-0001.parquet    # First chunk of processed data
+data-0002.parquet    # Second chunk (automatically incremented)
+data-0003.parquet    # Third chunk, etc.
 ```
 
 #### Parquet Optimization
 - **Compression**: SNAPPY for fast read/write
-- **Row Groups**: 100,000 rows per group for optimal streaming
+- **Row Groups**: Optimized for streaming access
 - **Schema**: Consistent across all sources
-- **Size**: Approximately 50MB per shard
+- **Smart Chunking**: Automatic file size management with incremental indexing
 
 #### Data Schema
-Each record contains standardized evaluation information with rich metadata and comprehensive timestamps:
+Each record contains standardized evaluation information:
 
 ```python
 {
   # Core evaluation data
+  'evaluation_id': 'unique_hash_identifier',
   'dataset_name': 'openbookqa',
-  'hf_split': 'test', 
-  'hf_index': 4957,
   'model_name': '01-ai/yi-34b',
   'model_family': 'yi-34b',
-  'evaluation_method_name': 'label_only_match',
+  'raw_input': 'Question text...',
+  'ground_truth': 'Expected answer',
+  'output': 'Model response',
   'evaluation_score': 1.0,
+  'evaluation_method_name': 'exact_match',
   
-  # Rich metadata for analysis
-  'evaluation_id': 'bb232a7d24e9c049bf1a8bfbfb92192010e0e3b8585aab6c5f147507837dd2af',
-  'raw_input': 'A person wants to start saving money so that they can afford a nice vacation...',
-  'ground_truth': 'B',
-  'output': 'B',
-  
-  # Multi-source provenance and timestamps
+  # Metadata and provenance
   'source': 'helm',
-  'processed_at': '2025-09-03T21:20:51.606743Z',
-  'aggregation_timestamp': '2025-09-03T21:20:51.606743Z',
-  'pipeline_stage': 'aggregation'
+  'benchmark': 'lite',
+  'hf_split': 'test',
+  'hf_index': 4957,
+  'processing_date': '2025-01-15',
+  'timestamp': '2025-01-15T14:30:00Z'
 }
 ```
 
@@ -644,20 +628,15 @@ Each record contains standardized evaluation information with rich metadata and 
 
 **Purpose**: Benchmark-model performance summaries for leaderboards and quick analysis
 
-#### File Naming Convention
+#### File Naming Convention with Source-Specific Indexing
 ```
-comprehensive_stats_helm_20250903_120000.parquet  # Comprehensive stats with timestamp
-stats-helm_lite_part_001.parquet                 # Individual shard stats (also here)
+source-helm-0001.parquet    # HELM statistics, chunk 1
+source-helm-0002.parquet    # HELM statistics, chunk 2
+source-other-0001.parquet   # Other source statistics, chunk 1
 ```
 
 #### Statistics Schema
-Each record represents a benchmark-model combination with aggregated metrics and comprehensive timestamps:
-
-```python
-{
-  # Identification
-  'source': 'helm',
-  'dataset_name': 'gsm8kscenario',
+Each record represents a model-benchmark-dataset combination:
   'model_name': 'openai/gpt-4-0613',
   'model_family': 'gpt-4',
   'evaluation_method_name': 'label_only_match',
@@ -668,13 +647,23 @@ Each record represents a benchmark-model combination with aggregated metrics and
   'mean_score': 0.932,
   'std_score': 0.251746,
   'min_score': 0.0,
+```python
+{
+  # Identification
+  'source': 'helm',
+  'dataset_name': 'gsm8kscenario',
+  'model_name': 'gpt-4',
+  'benchmark': 'lite',
+  
+  # Performance metrics
+  'evaluation_score': 0.847,
+  'total_evaluations': 1000,
+  'min_score': 0.0,
   'max_score': 1.0,
   
   # Metadata and timestamps
-  'processed_at': '2025-09-03T22:15:30.123456Z',
-  'statistics_generated_at': '2025-09-03T22:15:30.123456Z',
-  'comprehensive_stats_generated_at': '2025-09-03T22:15:30.123456Z',
-  'pipeline_stage': 'comprehensive_statistics',
+  'processing_date': '2025-01-15',
+  'timestamp': '2025-01-15T14:30:00Z',
   'data_freshness_hours': 0
 }
 ```
@@ -684,11 +673,11 @@ Each record represents a benchmark-model combination with aggregated metrics and
 | Aspect | Detailed Records | Comprehensive Statistics |
 |--------|------------------|-------------------------|
 | **Use Case** | Research, debugging, deep analysis | Leaderboards, quick comparisons |
-| **Record Type** | Individual evaluations | Benchmark-model summaries |
-| **File Size** | ~50MB per benchmark | ~16KB total |
-| **Update Freq** | Weekly | Daily |
+| **Record Type** | Individual evaluations | Model-benchmark-dataset summaries |
+| **Indexing** | data-XXXXX.parquet | source-XXXXX.parquet |
+| **Update Freq** | Weekly | Daily + after each scraping |
 | **Memory Usage** | High (streaming recommended) | Low (fits in memory) |
-| **Query Speed** | Slower (large data) | Faster (small data) |
+| **Query Speed** | Slower (large data) | Faster (aggregated data) |
 
 ## 🤝 Contributing
 
@@ -728,14 +717,23 @@ from datasets import Dataset
 import pandas as pd
 df = pd.read_parquet('your_output.parquet')
 dataset = Dataset.from_pandas(df)
+### Testing New Sources
+Before submitting a new source integration:
+
+```bash
+# Test the processing pipeline
+python scripts/your_source_processor.py
+
+# Validate schema compliance
+python -c "
+import pandas as pd
+df = pd.read_parquet('your_output.parquet')
+print('Required columns:', df.columns.tolist())
 print('✅ Schema validation passed')
 "
 
-# Test automation integration
-python scripts/incremental_upload.py \
-  --benchmarks test \
-  --source-name your_source \
-  --repo-id test/dataset
+# Test with sample data in tests/ directory
+python scripts/your_source_processor.py --test-mode
 ```
 
 ## 📄 License
@@ -747,7 +745,7 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 - **Issues**: [GitHub Issues](https://github.com/evaleval/every-eval-ever/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/evaleval/every-eval-ever/discussions)  
 - **Dataset**: [HuggingFace Dataset Page](https://huggingface.co/datasets/evaleval/every_eval_ever)
-- **Documentation**: Source-specific docs in `docs/` directory
+- **Statistics**: [HuggingFace Statistics Page](https://huggingface.co/datasets/evaleval/every_eval_score_ever)
 
 ### FAQ
 
@@ -757,9 +755,10 @@ dataset = load_dataset("evaleval/every_eval_ever")
 helm_data = dataset.filter(lambda x: x['source'] == 'helm')
 ```
 
-**Q: Can I run processing without uploading to HuggingFace?**
-```bash
-python main.py helm --benchmark lite --output local_output.parquet
+**Q: How do I get the latest statistics?**
+```python
+stats = load_dataset("evaleval/every_eval_score_ever")
+latest_stats = stats['train']
 ```
 
 **Q: How do I add a custom evaluation source?**
