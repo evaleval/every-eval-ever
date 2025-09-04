@@ -465,47 +465,74 @@ def process_with_optimization(args):
     logger.info("=" * 60)
     logger.info("🚀 Starting optimized processing")
     logger.info(f"📦 Processing {len(task_chunks)} chunks")
+    logger.info(f"🔀 {min(len(task_chunks), args.chunk_workers)} parallel chunk workers")
     logger.info(f"⚡ {args.max_workers} workers per chunk")
     logger.info(f"☁️ {args.upload_workers} upload workers")
     logger.info("=" * 60)
     
     # Process chunks with uploads in parallel
     upload_executor = ThreadPoolExecutor(max_workers=args.upload_workers)
+    
+    # NEW: Process chunks in parallel instead of serially
+    chunk_executor = ThreadPoolExecutor(max_workers=min(len(task_chunks), args.chunk_workers))  # Limit concurrent chunks
+    
     upload_futures = []
+    chunk_futures = []
     successful_uploads = 0
     # Use the same counter for both chunk ID and part number since they're in sync
     current_number = start_number
     
     start_time = time.time()
     
-    for chunk_idx, chunk_tasks in enumerate(task_chunks, 1):
-        logger.info(f"\n--- Chunk {chunk_idx}/{len(task_chunks)} (ID: {current_number}) ---")
+    logger.info(f"🚀 Starting PARALLEL chunk processing with {min(len(task_chunks), args.chunk_workers)} concurrent chunks")
+    
+    # Submit all chunks for parallel processing
+    chunk_number_mapping = {}  # Track chunk number for each future
+    for chunk_idx, chunk_tasks in enumerate(task_chunks):
+        chunk_number = current_number + chunk_idx
+        chunk_number_mapping[chunk_idx] = chunk_number
         
-        # Process chunk with incremental chunk ID
-        chunk_file = process_chunk(chunk_tasks, current_number, args.max_workers, args.timeout, benchmark_name)
+        logger.info(f"🔄 Submitting chunk {chunk_idx+1}/{len(task_chunks)} (ID: {chunk_number}) for parallel processing")
         
-        if chunk_file:
-            # Submit upload task
-            upload_future = upload_executor.submit(
-                upload_file, api, chunk_file, args.repo_id, args.source_name, current_number, not args.no_cleanup
-            )
-            upload_futures.append(upload_future)
+        # Submit chunk for parallel processing
+        chunk_future = chunk_executor.submit(
+            process_chunk, chunk_tasks, chunk_number, args.max_workers, args.timeout, benchmark_name
+        )
+        chunk_futures.append((chunk_idx, chunk_future, chunk_number))
+    
+    # Process completed chunks as they finish and submit for upload
+    completed_chunks = 0
+    for chunk_idx, chunk_future, chunk_number in chunk_futures:
+        try:
+            chunk_file = chunk_future.result()  # Wait for this chunk to complete
+            completed_chunks += 1
             
-            # Update progress with detailed metrics
-            elapsed = time.time() - start_time
-            elapsed_minutes = elapsed / 60
-            progress = chunk_idx / len(task_chunks)
-            eta_minutes = (elapsed / progress - elapsed) / 60 if progress > 0 else 0
-            total_entries = chunk_idx * args.chunk_size  # Approximate
-            processing_rate = total_entries / elapsed if elapsed > 0 else 0
-            
-            logger.info(f"📈 Progress: {chunk_idx}/{len(task_chunks)} chunks ({progress:.1%}) | ~{total_entries:,} entries")
-            logger.info(f"⏱️ Elapsed: {elapsed_minutes:.1f}min | ETA: {eta_minutes:.1f}min | Rate: {processing_rate:.0f} entries/sec")
-        else:
-            logger.error(f"❌ Chunk {current_number} failed")
-        
-        # Increment number for next iteration
-        current_number += 1
+            if chunk_file:
+                # Submit upload task immediately
+                upload_future = upload_executor.submit(
+                    upload_file, api, chunk_file, args.repo_id, args.source_name, chunk_number, not args.no_cleanup
+                )
+                upload_futures.append(upload_future)
+                
+                # Update progress with detailed metrics
+                elapsed = time.time() - start_time
+                elapsed_minutes = elapsed / 60
+                progress = completed_chunks / len(task_chunks)
+                eta_minutes = (elapsed / progress - elapsed) / 60 if progress > 0 else 0
+                total_entries = completed_chunks * args.chunk_size  # Approximate
+                processing_rate = total_entries / elapsed if elapsed > 0 else 0
+                
+                logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed")
+                logger.info(f"📈 Progress: {completed_chunks}/{len(task_chunks)} chunks ({progress:.1%}) | ~{total_entries:,} entries")
+                logger.info(f"⏱️ Elapsed: {elapsed_minutes:.1f}min | ETA: {eta_minutes:.1f}min | Rate: {processing_rate:.0f} entries/sec")
+            else:
+                logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed")
+                
+        except Exception as e:
+            logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed with error: {e}")
+    
+    # Shutdown chunk executor
+    chunk_executor.shutdown(wait=True)
     
     # Wait for all uploads to complete
     logger.info(f"\n⏳ Waiting for {len(upload_futures)} uploads to complete...")
@@ -537,6 +564,7 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=100, help="Tasks per chunk (default: 100 for maximum parallelization)")
     parser.add_argument("--max-workers", type=int, default=8, help="Workers per chunk (default: 8)")
     parser.add_argument("--upload-workers", type=int, default=6, help="Parallel upload workers (default: 6)")
+    parser.add_argument("--chunk-workers", type=int, default=4, help="Parallel chunk processing workers (default: 4)")
     parser.add_argument("--timeout", type=int, default=30, help="Timeout per chunk in minutes (default: 30, aggressive for speed)")
     parser.add_argument("--repo-id", type=str, required=True, help="HuggingFace dataset repository ID")
     parser.add_argument("--source-name", type=str, default="helm", help="Source name for file organization")
