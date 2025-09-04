@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import os
 import subprocess
 import sys
@@ -39,6 +40,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.utils.logging_config import setup_logging
+from config.settings import BENCHMARK_CSVS_DIR
 
 # Set up logging
 logger = setup_logging("optimized_helm.log", "OptimizedHELM")
@@ -328,6 +330,24 @@ def main():
         csv_file = args.csv_file
     elif args.benchmark:
         csv_file = f"data/benchmark_lines/helm_{args.benchmark}.csv"
+        
+        # Check if CSV file exists, if not generate it
+        csv_path = Path(csv_file)
+        if not csv_path.exists():
+            logger.info(f"📥 CSV for benchmark '{args.benchmark}' not found. Generating...")
+            try:
+                # Create the benchmark_lines directory if it doesn't exist
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Import web_scraper to generate the CSV
+                from src.sources.helm.web_scraper import main as create_csv_main
+                asyncio.run(create_csv_main(benchmark=args.benchmark, output_dir=str(csv_path.parent)))
+                logger.info(f"✅ Successfully created CSV: {csv_file}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create CSV for benchmark '{args.benchmark}': {e}")
+                return False
+        else:
+            logger.info(f"📄 Found existing CSV for benchmark '{args.benchmark}': {csv_file}")
     else:
         parser.error("Either --benchmark or --csv-file must be specified")
     
