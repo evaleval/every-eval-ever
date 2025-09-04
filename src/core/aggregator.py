@@ -11,13 +11,24 @@ from config.settings import PROCESSED_DATA_DIR, AGGREGATED_DATA_DIR
 
 REQUIRED_COLUMNS: List[str] = [
     "dataset_name",
-    "hf_split",
+    "hf_split", 
     "hf_index",
     "model_name",
     "model_family",
     "evaluation_method_name",
     "evaluation_score",
 ]
+
+# Additional metadata columns for multi-source support
+METADATA_COLUMNS: List[str] = [
+    "evaluation_id",
+    "raw_input",
+    "ground_truth", 
+    "output",
+]
+
+# All columns to keep in the final dataset
+ALL_COLUMNS = REQUIRED_COLUMNS + METADATA_COLUMNS
 
 
 def _batch_iter(items: List[Path], batch_size: int) -> Iterable[List[Path]]:
@@ -30,25 +41,28 @@ def aggregate_to_parquet(
         input_dir: Path = PROCESSED_DATA_DIR,
         output_dir: Path = AGGREGATED_DATA_DIR,
         batch_size: int = 10,
+        source_name: str = "helm",
 ) -> Path:
     """Aggregate many HELM CSVs into a single Parquet file.
 
     - Reads files in batches of `batch_size` to keep memory bounded
-    - Keeps only REQUIRED_COLUMNS
+    - Keeps required columns plus additional metadata
     - Normalizes hf_split: 'valid' -> 'validation'
+    - Adds source metadata for multi-source support
     
     Args:
         benchmark: Benchmark type (e.g., 'classic', 'lite', 'mmlu')
         input_dir: Directory containing CSV files (default: data/processed/)
         output_dir: Directory to save parquet file (default: data/aggregated/)
         batch_size: Number of CSV files to process in each batch
+        source_name: Name of the evaluation source (default: 'helm')
     """
 
     # Use benchmark-specific input directory
     in_dir = input_dir / benchmark
 
     # Create output filename and path
-    filename = f"helm_{benchmark}_aggregated.parquet"
+    filename = f"{source_name}_{benchmark}_aggregated.parquet"
     out_path = output_dir / filename
 
     in_dir = in_dir.resolve()
@@ -68,7 +82,13 @@ def aggregate_to_parquet(
         frames: List[pd.DataFrame] = []
         for csv_path in batch:
             try:
-                df = pd.read_csv(csv_path, usecols=REQUIRED_COLUMNS)
+                # Read all available columns, then filter to what we want
+                df = pd.read_csv(csv_path)
+                
+                # Keep only columns that exist in both ALL_COLUMNS and the CSV
+                available_columns = [col for col in ALL_COLUMNS if col in df.columns]
+                df = df[available_columns]
+                
             except Exception as e:
                 print(f"[skip] Failed reading {csv_path.name}: {e}")
                 continue
@@ -77,6 +97,13 @@ def aggregate_to_parquet(
             if "hf_split" in df.columns:
                 df["hf_split"] = df["hf_split"].replace({"valid": "validation"})
 
+            # Add source metadata
+            df["source"] = source_name
+            
+            # Add processing timestamp
+            from datetime import datetime
+            df["processed_at"] = datetime.now().isoformat()
+
             frames.append(df)
 
         if not frames:
@@ -84,8 +111,9 @@ def aggregate_to_parquet(
 
         batch_df = pd.concat(frames, ignore_index=True)
 
-        # Ensure stable column order and types where possible
-        batch_df = batch_df.reindex(columns=REQUIRED_COLUMNS)
+        # Define final column order with new metadata columns
+        final_columns = ["source", "processed_at"] + [col for col in ALL_COLUMNS if col in batch_df.columns]
+        batch_df = batch_df.reindex(columns=final_columns)
 
         table = pa.Table.from_pandas(batch_df, preserve_index=False)
         if writer is None:
@@ -106,8 +134,9 @@ def aggregate_to_parquet(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Aggregate HELM CSV files into Parquet format")
+    parser = argparse.ArgumentParser(description="Aggregate CSV files into Parquet format for multi-source evaluation data")
     parser.add_argument("--benchmark", required=True, help="Benchmark type (e.g., 'classic', 'lite', 'mmlu')")
+    parser.add_argument("--source-name", default="helm", help="Name of the evaluation source (default: 'helm')")
     parser.add_argument("--input-dir",
                         default=str(PROCESSED_DATA_DIR),
                         help=f"Input directory containing CSV files (default: {PROCESSED_DATA_DIR})")
@@ -126,5 +155,6 @@ if __name__ == "__main__":
         benchmark=args.benchmark,
         input_dir=input_dir,
         output_dir=output_dir,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        source_name=args.source_name
     )

@@ -135,6 +135,7 @@ def process_benchmark(benchmark: str, part_num: int, source_name: str,
         agg_cmd = [
             sys.executable, "-m", "src.core.aggregator",
             "--benchmark", benchmark,
+            "--source-name", source_name,
             "--output-dir", str(output_path.parent)
         ]
         
@@ -158,9 +159,9 @@ def process_benchmark(benchmark: str, part_num: int, source_name: str,
         if agg_process.returncode != 0:
             raise subprocess.CalledProcessError(agg_process.returncode, agg_cmd)
         
-        # The aggregator creates helm_{benchmark}_aggregated.parquet
+        # The aggregator creates {source_name}_{benchmark}_aggregated.parquet
         # We need to rename it to our desired format
-        aggregated_file = output_path.parent / f"helm_{benchmark}_aggregated.parquet"
+        aggregated_file = output_path.parent / f"{source_name}_{benchmark}_aggregated.parquet"
         if aggregated_file.exists():
             aggregated_file.rename(output_path)
             logger.info(f"✅ Renamed {aggregated_file.name} to {output_path.name}")
