@@ -57,7 +57,9 @@ jobs:
           python scripts/generate_comprehensive_stats.py \
             --main-repo-id evaleval/every_eval_ever \
             --stats-repo-id evaleval/every_eval_score_ever \
-            --source-name "$SOURCE_NAME"
+            --source-name "$SOURCE_NAME" \
+            --shard-size 10000 \
+            --max-workers 4
           
           echo "📅 Completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
 

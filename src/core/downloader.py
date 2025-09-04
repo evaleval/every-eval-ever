@@ -19,19 +19,14 @@ from config.settings import (
     HELM_FILE_TYPES,
 )
 
+# Import centralized logging
+from src.utils.logging_config import setup_logging
+
 # Initialize colorama
 colorama.init()
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("helm_processor.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("HELM_Processor")
+# Set up logging using centralized configuration
+logger = setup_logging("helm_processor.log", "HELM_Generic_Downloader")
 
 
 # Custom logger function with emojis and colors

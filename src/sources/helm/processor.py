@@ -32,19 +32,14 @@ from config.settings import (
     BENCHMARK_CSVS_DIR,
 )
 
+# Import centralized logging
+from src.utils.logging_config import setup_logging
+
 # Initialize colorama
 colorama.init()
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("helm_processor.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("HELM_Processor")
+# Set up logging using centralized configuration
+logger = setup_logging("helm_processor.log", "HELM_Processor")
 
 # Create necessary directories (will be created dynamically based on args)
 

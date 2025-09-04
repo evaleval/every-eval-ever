@@ -1,0 +1,50 @@
+Performance Comparison Results - 2025-09-03 22:44:12.407224
+Benchmark: lite
+Total tasks: 500
+Demo mode: True
+
+
+================================================================================
+🚀 HELM PROCESSING PERFORMANCE COMPARISON
+================================================================================
+
+📊 OVERALL PERFORMANCE:
+  Original Sequential:  23.0s  (1303.0 tasks/min)
+  Optimized Chunked:    6.3s   (4765.5 tasks/min)
+  
+  🎯 Speedup:           3.7x faster
+  ⚡ Rate improvement:  +3462.5 tasks/min
+
+⏱️ TIME TO FIRST RESULT:
+  Original:   180.0s  (no results until complete)
+  Chunked:    5.1s   (first chunk uploaded)
+  
+  🎯 Faster feedback:   35.1x sooner
+
+💾 RESOURCE USAGE:
+  Memory Peak:
+    Original:   250.0MB  (all data loaded)
+    Chunked:    25.0MB   (one chunk at a time)
+    🎯 Savings:  90.0% less memory
+  
+  Disk Peak:
+    Original:   500.0MB   (all intermediate files)
+    Chunked:    50.0MB    (one chunk at a time)  
+    🎯 Savings:  90.0% less disk space
+
+📦 CHUNKED APPROACH DETAILS:
+  Total chunks:         10
+  Tasks per chunk:      50
+  Parallel workers:     4
+  Upload overlap:       2.8s saved
+
+🎯 KEY BENEFITS:
+  ✅ 3.7x faster overall processing
+  ✅ 35.1x faster time to first result
+  ✅ 90.0% less memory usage
+  ✅ 90.0% less disk space required
+  ✅ Fault tolerance (partial completion possible)
+  ✅ Progress visibility (incremental uploads)
+  ✅ Parallel download + upload pipeline
+
+================================================================================

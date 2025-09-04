@@ -10,28 +10,24 @@ from tqdm import tqdm
 
 # Import centralized settings (paths, constants)
 from config.settings import (
+    HELM_VERSIONS,
+    HELM_FILE_TYPES,
+    HELM_URL_WITH_BENCHMARK_TEMPLATE,
+    HELM_URL_WITHOUT_BENCHMARK_TEMPLATE,
     DOWNLOADS_DIR,
     PROCESSED_DATA_DIR,
     DEFAULT_START_VERSION,
-    HELM_VERSIONS,
-    HELM_URL_WITH_BENCHMARK_TEMPLATE,
-    HELM_URL_WITHOUT_BENCHMARK_TEMPLATE,
-    HELM_FILE_TYPES,
+    TQDM_BAR_FORMAT,
 )
+
+# Import centralized logging
+from src.utils.logging_config import setup_logging
 
 # Initialize colorama
 colorama.init()
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("helm_processor.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("HELM_Processor")
+# Set up logging using centralized configuration
+logger = setup_logging("helm_processor.log", "HELM_Downloader")
 
 
 # Custom logger function with emojis and colors

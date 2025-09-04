@@ -1,0 +1,24 @@
+2025-09-03 22:43:43,085 - PerformanceTest - INFO - 🧪 Performance comparison for lite benchmark
+2025-09-03 22:43:43,085 - PerformanceTest - INFO - 📊 Simulating 500 tasks
+2025-09-03 22:43:43,085 - PerformanceTest - INFO - ⚡ Demo mode: True
+2025-09-03 22:43:43,085 - PerformanceTest - INFO - 
+============================================================
+2025-09-03 22:43:43,085 - PerformanceTest - INFO - 🐌 Simulating original approach (500 tasks)
+2025-09-03 22:43:43,085 - PerformanceTest - INFO - 📥 Download phase: 100.0s (500 tasks @ 5.0/s)
+2025-09-03 22:43:53,091 - PerformanceTest - INFO - 🔄 Convert phase: 50.0s
+2025-09-03 22:43:58,100 - PerformanceTest - INFO - 📊 Aggregate phase: 25.0s
+2025-09-03 22:44:01,104 - PerformanceTest - INFO - ☁️ Upload phase: 5.0s (50.0MB)
+2025-09-03 22:44:06,109 - PerformanceTest - INFO - 
+============================================================
+2025-09-03 22:44:06,110 - PerformanceTest - INFO - 🚀 Simulating chunked approach (500 tasks, 50 per chunk)
+2025-09-03 22:44:06,110 - PerformanceTest - INFO - 📦 Chunk 1/10: 50 tasks (0.6s)
+2025-09-03 22:44:06,739 - PerformanceTest - INFO - 📦 Chunk 2/10: 50 tasks (0.6s)
+2025-09-03 22:44:07,367 - PerformanceTest - INFO - 📦 Chunk 3/10: 50 tasks (0.6s)
+2025-09-03 22:44:07,997 - PerformanceTest - INFO - 📦 Chunk 4/10: 50 tasks (0.6s)
+2025-09-03 22:44:08,628 - PerformanceTest - INFO - 📦 Chunk 5/10: 50 tasks (0.6s)
+2025-09-03 22:44:09,254 - PerformanceTest - INFO - 📦 Chunk 6/10: 50 tasks (0.6s)
+2025-09-03 22:44:09,884 - PerformanceTest - INFO - 📦 Chunk 7/10: 50 tasks (0.6s)
+2025-09-03 22:44:10,515 - PerformanceTest - INFO - 📦 Chunk 8/10: 50 tasks (0.6s)
+2025-09-03 22:44:11,142 - PerformanceTest - INFO - 📦 Chunk 9/10: 50 tasks (0.6s)
+2025-09-03 22:44:11,773 - PerformanceTest - INFO - 📦 Chunk 10/10: 50 tasks (0.6s)
+2025-09-03 22:44:12,407 - PerformanceTest - INFO - 📁 Detailed results saved to: performance_comparison_results.txt
