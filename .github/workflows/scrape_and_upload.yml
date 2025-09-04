@@ -19,6 +19,7 @@ jobs:
       - name: Run scraping and processing
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: evaleval/every_eval_ever
           PYTHONUNBUFFERED: 1
           OMP_NUM_THREADS: 8
           NUMBA_DISABLE_JIT: 1
@@ -51,7 +52,8 @@ jobs:
                 --chunk-workers 4 \
                 --no-verify \
                 --batch-size 50 \
-                --max-retries 3
+                --max-retries 3 \
+                --repo-id $HF_REPO_ID
             ) &
             pids+=($!)
             echo "   📍 Started $benchmark with PID: ${pids[-1]}"
@@ -108,22 +110,11 @@ jobs:
       - name: Run statistics generation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: evaleval/every_eval_ever
           PYTHONUNBUFFERED: 1
         run: |
-      echo "📥 Fetching manifests from HuggingFace to speed up stats generation..."
-      python - <<'PY'
-import os
-from huggingface_hub import HfApi, hf_hub_download
-os.makedirs('data/aggregated', exist_ok=True)
-api = HfApi(token=os.environ.get('HF_TOKEN'))
-for bm in ['lite','mmlu','classic']:
-  try:
-    # Download manifest if available
-    hf_hub_download(repo_id='${{ secrets.REPO_ID }}' if False else os.environ.get('HF_REPO_ID',''), filename=f'manifests/manifest_{bm}.json', repo_type='dataset', local_dir='data/aggregated')
-    print(f'Downloaded manifest for {bm}')
-  except Exception as e:
-    print(f'No manifest for {bm}: {e}')
-PY
+          echo "📥 Fetching manifests from HuggingFace to speed up stats generation..."
+          python -c "import os; from huggingface_hub import hf_hub_download; os.makedirs('data/aggregated', exist_ok=True); repo_id = os.environ.get('HF_REPO_ID'); [print(f'Downloaded manifest for {bm}') if hf_hub_download(repo_id=repo_id, filename=f'manifests/manifest_{bm}.json', repo_type='dataset', local_dir='data/aggregated') or True else print(f'No manifest for {bm}') for bm in ['lite','mmlu','classic']]" || echo "⚠️ Some manifests not found, continuing..."
 
           echo ""
           echo "📊 STEP 2: GENERATING COMPREHENSIVE DATASET STATISTICS"
@@ -134,21 +125,24 @@ PY
             --generate-stats-only \
             --workers 8 \
             --upload-workers 6 \
-            --no-verify
+            --no-verify \
+            --repo-id $HF_REPO_ID
 
           python scripts/optimized_helm_processor.py \
             --benchmark mmlu \
             --generate-stats-only \
             --workers 8 \
             --upload-workers 6 \
-            --no-verify
+            --no-verify \
+            --repo-id $HF_REPO_ID
 
           python scripts/optimized_helm_processor.py \
             --benchmark classic \
             --generate-stats-only \
             --workers 8 \
             --upload-workers 6 \
-            --no-verify
+            --no-verify \
+            --repo-id $HF_REPO_ID
 
           echo "✅ Statistics generation completed successfully"
           echo "📅 Step 2 completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
