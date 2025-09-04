@@ -34,6 +34,7 @@ import logging
 import pandas as pd
 
 from huggingface_hub import HfApi
+from datasets import load_dataset
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -78,10 +79,62 @@ def get_existing_files(api: HfApi, repo_id: str) -> set:
         return set()
 
 
-def read_tasks_chunked(csv_file: str, chunk_size: int, adapter_method: str = None) -> List[List[str]]:
-    """Read tasks from CSV and split into chunks."""
+def get_processed_tasks(api: HfApi, repo_id: str, benchmark: str) -> set:
+    """Get set of tasks that have already been processed for this benchmark using efficient lazy loading."""
+    processed_tasks = set()
     try:
-        df = pd.read_csv(csv_file)
+        # Check if the dataset exists and has data
+        try:
+            # Use streaming for memory efficiency - don't load entire dataset into memory
+            dataset = load_dataset(repo_id, streaming=True, split='train')
+            logger.info(f"🔍 Efficiently checking processed tasks using streaming dataset...")
+            
+            # Iterate through dataset to collect task identifiers
+            # This is memory-efficient as it streams rather than loading everything
+            for i, example in enumerate(dataset):
+                # Filter by benchmark if available
+                if 'benchmark' in example and example['benchmark'] != benchmark:
+                    continue
+                
+                # Look for task identifier in common columns (prioritize task_id)
+                task_id = None
+                for col in ['task_id', 'task', 'dataset_name', 'evaluation_id']:
+                    if col in example and example[col]:
+                        task_id = example[col]
+                        break
+                
+                if task_id:
+                    processed_tasks.add(task_id)
+                
+                # Progress logging every 10k examples
+                if i > 0 and i % 10000 == 0:
+                    logger.info(f"🔄 Scanned {i:,} examples, found {len(processed_tasks)} unique tasks for '{benchmark}'")
+                
+                # Limit scanning to avoid excessive startup time (first 100k examples should be representative)
+                if i >= 100000:
+                    logger.info(f"⏱️ Stopping scan at {i:,} examples to avoid excessive startup time")
+                    break
+            
+            logger.info(f"✅ Found {len(processed_tasks)} already processed tasks for benchmark '{benchmark}'")
+            if len(processed_tasks) > 0:
+                logger.info(f"📝 Sample processed tasks: {list(processed_tasks)[:5]}")
+            
+        except Exception as e:
+            logger.info(f"📝 Dataset not found or empty: {e}")
+            logger.info(f"📝 All tasks will be processed (first run or empty dataset)")
+        
+        return processed_tasks
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Error checking processed tasks: {e}")
+        return set()
+
+
+def read_tasks_chunked(csv_file: str, chunk_size: int, adapter_method: str = None, processed_tasks: set = None) -> List[List[str]]:
+    """Read tasks from CSV and split into chunks with optimized reading and duplicate filtering."""
+    try:
+        # Fast CSV reading with minimal parsing for speed
+        df = pd.read_csv(csv_file, dtype=str, low_memory=False)
         
         # Check which column contains the task identifiers
         if 'task' in df.columns:
@@ -94,10 +147,41 @@ def read_tasks_chunked(csv_file: str, chunk_size: int, adapter_method: str = Non
             tasks = df.iloc[:, 0].tolist()
             logger.warning(f"⚠️ No 'task' or 'Run' column found, using first column: {df.columns[0]}")
         
+        original_count = len(tasks)
+        
         # Filter by adapter method if specified
         if adapter_method:
             tasks = [task for task in tasks if adapter_method in task]
             logger.info(f"🔽 Filtered to {len(tasks)} tasks with adapter method: {adapter_method}")
+        
+        # Filter out already processed tasks
+        if processed_tasks:
+            before_dedup = len(tasks)
+            tasks_to_keep = []
+            skipped_tasks = []
+            
+            for task in tasks:
+                if task not in processed_tasks:
+                    tasks_to_keep.append(task)
+                else:
+                    skipped_tasks.append(task)
+            
+            tasks = tasks_to_keep
+            removed_count = len(skipped_tasks)
+            
+            if removed_count > 0:
+                logger.info(f"⏭️ Skipped {removed_count} already processed tasks")
+                logger.info(f"🆕 {len(tasks)} new tasks to process (saved {removed_count/before_dedup:.1%} work)")
+                if removed_count <= 10:  # Show details for small numbers
+                    logger.info(f"📝 Skipped tasks: {skipped_tasks}")
+                else:
+                    logger.info(f"📝 Sample skipped tasks: {skipped_tasks[:5]}...")
+            else:
+                logger.info(f"✨ No duplicate tasks found - all {len(tasks)} tasks are new")
+        
+        if len(tasks) == 0:
+            logger.warning(f"⚠️ No tasks to process after filtering!")
+            return []
         
         chunks = [tasks[i:i+chunk_size] for i in range(0, len(tasks), chunk_size)]
         logger.info(f"📦 Split {len(tasks)} tasks into {len(chunks)} chunks of ~{chunk_size} tasks each")
@@ -121,6 +205,7 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
     chunk_dir.mkdir(parents=True, exist_ok=True)
     
     processed_files = []
+    task_file_mapping = {}  # Track which task produced which file
     
     # Process each task in the chunk
     for i, task in enumerate(chunk_tasks, 1):
@@ -147,9 +232,12 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
                         entry_count = len(df)
                         logger.info(f"✅ Task {i} completed: {entry_count} entries")
                         processed_files.append(output_file)
+                        # Store the actual HELM task/run name for proper task_id assignment
+                        task_file_mapping[output_file] = task  # task is the HELM run name like "openai_gpt-3.5-turbo:openbookqa:1"
                     except Exception as e:
                         logger.warning(f"⚠️ Could not count entries in {output_file}: {e}")
                         processed_files.append(output_file)
+                        task_file_mapping[output_file] = task
                 else:
                     logger.error(f"❌ Task {i} failed: no output file generated")
             else:
@@ -180,17 +268,44 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
         
         if combined_data:
             start_time = time.time()
-            combined_df = pd.concat(combined_data, ignore_index=True)
             
-            # Add metadata fields
+            # Process data in smaller batches to save memory and increase speed
+            logger.info(f"📊 Combining {len(combined_data)} dataframes with {total_entries} total entries")
+            
+            # Add task_id to each dataframe before combining based on the actual task name
+            for i, (df, file_path) in enumerate(zip(combined_data, processed_files)):
+                if file_path in task_file_mapping:
+                    # Use the actual HELM task/run name
+                    task_name = task_file_mapping[file_path]
+                    df['task_id'] = task_name
+                    logger.debug(f"📝 Assigned task_id '{task_name}' to {len(df)} rows from {Path(file_path).name}")
+                else:
+                    # Fallback if mapping is missing - this shouldn't happen
+                    fallback_task = f"unknown_task_{i}"
+                    df['task_id'] = fallback_task
+                    logger.warning(f"⚠️ Missing task mapping for {file_path}, using fallback: {fallback_task}")
+            
+            # Use faster concat with minimal validation for speed
+            combined_df = pd.concat(combined_data, ignore_index=True, copy=False, sort=False)
+            
+            # Clear intermediate data immediately to free memory
+            del combined_data
+            
+            # Add metadata fields efficiently
             import datetime
+            timestamp = datetime.datetime.now()
             combined_df['source'] = 'helm'
             combined_df['benchmark'] = benchmark  
-            combined_df['timestamp'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
-            combined_df['processing_date'] = datetime.datetime.now().strftime('%Y-%m-%d')
+            combined_df['timestamp'] = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
+            combined_df['processing_date'] = timestamp.strftime('%Y-%m-%d')
+            
+            # Log task_id distribution for verification
+            if 'task_id' in combined_df.columns:
+                unique_tasks = combined_df['task_id'].nunique()
+                logger.info(f"📊 Combined data contains {unique_tasks} unique task_ids from {len(chunk_tasks)} processed tasks")
             
             # Reorder columns to put metadata first
-            metadata_cols = ['source', 'benchmark', 'timestamp', 'processing_date']
+            metadata_cols = ['task_id', 'source', 'benchmark', 'timestamp', 'processing_date']
             other_cols = [col for col in combined_df.columns if col not in metadata_cols]
             combined_df = combined_df[metadata_cols + other_cols]
             
@@ -199,7 +314,14 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
             agg_dir.mkdir(parents=True, exist_ok=True)
             
             output_file = agg_dir / f"chunk_{chunk_id:04d}.parquet"
-            combined_df.to_parquet(output_file)
+            
+            # Use faster parquet writing with optimized settings
+            combined_df.to_parquet(
+                output_file, 
+                compression='snappy',  # Faster than default
+                index=False,
+                engine='pyarrow'
+            )
             
             processing_time = time.time() - start_time
             logger.info(f"✅ Created chunk parquet: {output_file} ({total_entries} entries, {processing_time:.1f}s)")
@@ -227,11 +349,14 @@ def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, par
         logger.info(f"☁️ Uploading {file_path.name} as {remote_name} ({file_size_mb:.1f}MB)")
         
         start_time = time.time()
+        
+        # Fast upload with minimal retries for speed
         api.upload_file(
             path_or_fileobj=str(file_path),
             path_in_repo=remote_name,
             repo_id=repo_id,
-            repo_type="dataset"
+            repo_type="dataset",
+            run_as_future=False  # Synchronous for better error handling
         )
         
         upload_time = time.time() - start_time
@@ -301,14 +426,28 @@ def process_with_optimization(args):
     
     logger.info(f"📊 Starting from number {start_number} (both chunk ID and part number)")
     
-    # Read and chunk tasks
-    task_chunks = read_tasks_chunked(args.csv_file, args.chunk_size, args.adapter_method)
+    # Check for already processed tasks to avoid duplicates (unless skipped)
+    processed_tasks = set()
+    if not args.skip_duplicate_check:
+        logger.info("🔍 Checking for already processed tasks to avoid duplicates...")
+        processed_tasks = get_processed_tasks(api, args.repo_id, benchmark_name)
+    else:
+        logger.info("⏭️ Skipping duplicate check as requested")
+    
+    # Read and chunk tasks with duplicate filtering
+    task_chunks = read_tasks_chunked(args.csv_file, args.chunk_size, args.adapter_method, processed_tasks)
     
     if not task_chunks:
-        logger.error("❌ No tasks to process")
-        return False
+        if processed_tasks:
+            logger.warning("⚠️ No new tasks to process - all tasks may already be completed!")
+            logger.info("✅ Processing complete - no new work needed")
+            return True
+        else:
+            logger.error("❌ No tasks to process")
+            return False
     
-    logger.info(f"📊 CSV contains {sum(len(chunk) for chunk in task_chunks)} total tasks")
+    total_new_tasks = sum(len(chunk) for chunk in task_chunks)
+    logger.info(f"📊 Found {total_new_tasks} new tasks to process")
     logger.info("=" * 60)
     logger.info("🚀 Starting optimized processing")
     logger.info(f"📦 Processing {len(task_chunks)} chunks")
@@ -338,13 +477,16 @@ def process_with_optimization(args):
             )
             upload_futures.append(upload_future)
             
-            # Update progress
+            # Update progress with detailed metrics
             elapsed = time.time() - start_time
+            elapsed_minutes = elapsed / 60
             progress = chunk_idx / len(task_chunks)
             eta_minutes = (elapsed / progress - elapsed) / 60 if progress > 0 else 0
             total_entries = chunk_idx * args.chunk_size  # Approximate
+            processing_rate = total_entries / elapsed if elapsed > 0 else 0
             
-            logger.info(f"📈 Progress: {chunk_idx}/{len(task_chunks)} chunks ({progress*100:.1f}%) | ~{total_entries} entries | ETA: {eta_minutes:.1f}min")
+            logger.info(f"📈 Progress: {chunk_idx}/{len(task_chunks)} chunks ({progress:.1%}) | ~{total_entries:,} entries")
+            logger.info(f"⏱️ Elapsed: {elapsed_minutes:.1f}min | ETA: {eta_minutes:.1f}min | Rate: {processing_rate:.0f} entries/sec")
         else:
             logger.error(f"❌ Chunk {current_number} failed")
         
@@ -378,14 +520,15 @@ def main():
     parser.add_argument("--benchmark", type=str, choices=["lite", "mmlu", "classic"], 
                        help="Benchmark to process (determines CSV file)")
     parser.add_argument("--csv-file", type=str, help="Direct path to CSV file (overrides benchmark)")
-    parser.add_argument("--chunk-size", type=int, default=200, help="Tasks per chunk (default: 200 for optimal performance)")
-    parser.add_argument("--max-workers", type=int, default=2, help="Workers per chunk (default: 2)")
-    parser.add_argument("--upload-workers", type=int, default=2, help="Parallel upload workers (default: 2)")
-    parser.add_argument("--timeout", type=int, default=60, help="Timeout per chunk in minutes (default: 60)")
+    parser.add_argument("--chunk-size", type=int, default=100, help="Tasks per chunk (default: 100 for maximum parallelization)")
+    parser.add_argument("--max-workers", type=int, default=8, help="Workers per chunk (default: 8)")
+    parser.add_argument("--upload-workers", type=int, default=6, help="Parallel upload workers (default: 6)")
+    parser.add_argument("--timeout", type=int, default=30, help="Timeout per chunk in minutes (default: 30, aggressive for speed)")
     parser.add_argument("--repo-id", type=str, required=True, help="HuggingFace dataset repository ID")
     parser.add_argument("--source-name", type=str, default="helm", help="Source name for file organization")
     parser.add_argument("--adapter-method", type=str, help="Filter tasks by adapter method")
     parser.add_argument("--no-cleanup", action="store_true", help="Don't clean up parquet files after upload (for testing)")
+    parser.add_argument("--skip-duplicate-check", action="store_true", help="Skip checking for already processed tasks (faster startup)")
     
     args = parser.parse_args()
     

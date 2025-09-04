@@ -10,7 +10,7 @@ jobs:
   scrape_and_upload:
     name: Process Evaluation Data and Upload to HuggingFace
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 720  # Increased to 12 hours for aggressive parallel processing
 
     steps:
       - name: Checkout repository
@@ -38,33 +38,77 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONUNBUFFERED: 1
+          # Performance optimizations - aggressive settings for maximum speed
+          OMP_NUM_THREADS: 8
+          NUMBA_DISABLE_JIT: 1
+          PYTHONDONTWRITEBYTECODE: 1
+          PANDAS_COPY_ON_WRITE: 1
+          OPENBLAS_NUM_THREADS: 8
         run: |
           echo "🚀 Starting optimized chunked data processing workflow"
           echo "📅 Started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           echo "🖥️  Runner: ${{ runner.os }}"
           echo "🔧 Python version: $(python --version)"
-          echo "⚡ Processing with chunked parallel uploads for maximum performance"
+          echo "💾 Available memory: $(free -h | grep '^Mem:' | awk '{print $2}' 2>/dev/null || echo 'N/A')"
+          echo "💿 Available disk: $(df -h . | tail -1 | awk '{print $4}' 2>/dev/null || echo 'N/A')"
+          echo "🔧 CPU cores: $(nproc 2>/dev/null || echo 'N/A')"
+          echo "⚡ Processing with optimized chunked parallel uploads for maximum performance"
           
-          # Process benchmarks using optimized chunked approach
-          # This provides 3-4x speedup and immediate partial results
+          # Process benchmarks in parallel for maximum speed
+          # This processes all benchmarks simultaneously instead of sequentially
+          
+          echo ""
+          echo "🚀 AGGRESSIVE PARALLEL PROCESSING MODE"
+          echo "� Processing ALL benchmarks simultaneously"
+          echo "⚡ Each benchmark: 8 workers, 100 tasks/chunk, 6 upload workers"
+          echo "🔥 Target: Complete entire dataset in under 60 minutes"
+          
+          # Start all benchmarks in parallel background processes
+          # Priority order: lite (fastest), mmlu (medium), classic (largest)
+          pids=()
           
           for benchmark in lite mmlu classic; do
-            echo ""
-            echo "🔄 Processing benchmark: $benchmark"
-            echo "📦 Using chunked processing (200 tasks per chunk for optimal performance)"
-            echo "⚡ Parallel processing with 2 workers per chunk"
-            echo "☁️ Concurrent uploads while processing continues"
-            
-            python scripts/optimized_helm_processor.py \
-              --benchmark "$benchmark" \
-              --chunk-size 200 \
-              --max-workers 2 \
-              --upload-workers 2 \
-              --repo-id evaleval/every_eval_ever \
-              --source-name helm
-            
-            echo "✅ Completed benchmark: $benchmark"
+            echo "🔄 Starting parallel processing for benchmark: $benchmark"
+            (
+              python scripts/optimized_helm_processor.py \
+                --benchmark "$benchmark" \
+                --chunk-size 100 \
+                --max-workers 8 \
+                --upload-workers 6 \
+                --timeout 30 \
+                --repo-id evaleval/every_eval_ever \
+                --source-name helm
+              echo "✅ Completed benchmark: $benchmark"
+            ) &
+            pids+=($!)
           done
+          
+          echo ""
+          echo "⏳ Waiting for all ${#pids[@]} parallel benchmark processes to complete..."
+          
+          # Wait for all background processes and track failures
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "✅ Process $((i+1)) completed successfully"
+            else
+              echo "❌ Process $((i+1)) failed"
+              failed=$((failed+1))
+            fi
+          done
+          
+          if [ $failed -eq 0 ]; then
+            echo "🎉 All benchmarks processed successfully in parallel!"
+            echo "📊 Performance Summary:"
+            echo "   ⚡ Used aggressive parallelization (8 workers per benchmark)"
+            echo "   🔄 Processed 3 benchmarks simultaneously"
+            echo "   ⏭️ Skipped already processed tasks (duplicate detection)"
+            echo "   📦 100 tasks per chunk for optimal parallelization"
+            echo "   ☁️ 6 parallel uploads per benchmark"
+          else
+            echo "⚠️ $failed out of ${#pids[@]} benchmarks failed"
+            exit 1
+          fi
           
           echo ""
           echo "🎉 All benchmarks processed with optimized chunked pipeline!"
