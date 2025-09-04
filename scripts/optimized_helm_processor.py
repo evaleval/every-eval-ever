@@ -400,6 +400,74 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
         return None
 
 
+def update_manifest_incremental(benchmark_name: str, chunk_tasks: List[str], chunk_number: int, remote_name: str = None, api: HfApi = None, repo_id: str = None):
+    """Update the manifest file incrementally as chunks complete."""
+    try:
+        manifest_path = Path('data/aggregated') / f"manifest_{benchmark_name}.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Load existing manifest or create new one
+        if manifest_path.exists():
+            with open(manifest_path, 'r') as f:
+                manifest_data = json.load(f)
+        else:
+            manifest_data = {
+                'benchmark': benchmark_name,
+                'generated_at': datetime.now(timezone.utc).isoformat(),
+                'files': [],
+                'processed_tasks': [],
+                'task_count': 0,
+                'chunk_count': 0
+            }
+        
+        # Add chunk tasks to processed_tasks
+        for task in chunk_tasks:
+            if task not in manifest_data['processed_tasks']:
+                manifest_data['processed_tasks'].append(task)
+        
+        # Add file info if upload completed
+        if remote_name:
+            # Check if this chunk is already recorded
+            existing_file = next((f for f in manifest_data['files'] if f['chunk_number'] == chunk_number), None)
+            if not existing_file:
+                manifest_data['files'].append({
+                    'chunk_number': chunk_number,
+                    'remote_name': remote_name
+                })
+        
+        # Update metadata
+        manifest_data['processed_tasks'] = sorted(list(set(manifest_data['processed_tasks'])))
+        manifest_data['task_count'] = len(manifest_data['processed_tasks'])
+        manifest_data['chunk_count'] = len(manifest_data['files'])
+        manifest_data['last_updated'] = datetime.now(timezone.utc).isoformat()
+        
+        # Write updated manifest
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest_data, f, indent=2)
+        
+        logger.info(f"📦 Updated manifest: {manifest_path} ({manifest_data['task_count']} tasks, {manifest_data['chunk_count']} files)")
+        
+        # Upload updated manifest to HF if API is available
+        if api and repo_id:
+            try:
+                api.upload_file(
+                    path_or_fileobj=str(manifest_path),
+                    path_in_repo=f"manifests/manifest_{benchmark_name}.json",
+                    repo_id=repo_id,
+                    repo_type='dataset',
+                    run_as_future=False
+                )
+                logger.info(f"☁️ Updated manifest on HF: manifests/manifest_{benchmark_name}.json")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to upload updated manifest to HF: {e}")
+        
+        return True
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to update manifest: {e}")
+        return False
+
+
 def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, part_num: int, cleanup: bool = True) -> bool:
     """Upload a file to HuggingFace and clean up local file."""
     try:
@@ -544,9 +612,11 @@ def process_with_optimization(args):
     
     # Submit all chunks for parallel processing
     chunk_number_mapping = {}  # Track chunk number for each future
+    chunk_tasks_mapping = {}  # Track tasks for each chunk number
     for chunk_idx, chunk_tasks in enumerate(task_chunks):
         chunk_number = current_number + chunk_idx
         chunk_number_mapping[chunk_idx] = chunk_number
+        chunk_tasks_mapping[chunk_number] = chunk_tasks  # Store tasks for manifest updates
         
         logger.info(f"🔄 Submitting chunk {chunk_idx+1}/{len(task_chunks)} (ID: {chunk_number}) for parallel processing")
         
@@ -568,6 +638,11 @@ def process_with_optimization(args):
             
             if chunk_file:
                 logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed successfully: {chunk_file}")
+                
+                # Update manifest immediately with processed tasks (before upload)
+                chunk_tasks_for_manifest = chunk_tasks_mapping.get(chunk_number, [])
+                update_manifest_incremental(benchmark_name, chunk_tasks_for_manifest, chunk_number, 
+                                           api=api, repo_id=args.repo_id)
                 
                 # Submit upload task immediately
                 logger.info(f"☁️ Submitting chunk {chunk_number} for upload...")
@@ -612,6 +687,11 @@ def process_with_optimization(args):
                     'remote_name': remote_name
                 })
                 logger.info(f"✅ Successfully uploaded chunk {chunk_number} as {remote_name}")
+                
+                # Update manifest with upload info
+                chunk_tasks_for_manifest = chunk_tasks_mapping.get(chunk_number, [])
+                update_manifest_incremental(benchmark_name, chunk_tasks_for_manifest, chunk_number, 
+                                           remote_name=remote_name, api=api, repo_id=args.repo_id)
             else:
                 logger.error(f"❌ Upload failed for chunk {chunk_number}: no remote name returned")
         except TimeoutError:
@@ -629,40 +709,19 @@ def process_with_optimization(args):
     logger.info(f"⏱️ Total time: {total_time/60:.1f} minutes")
     logger.info(f"📈 Rate: {(sum(len(chunk) for chunk in task_chunks) * 500) / (total_time/60):.1f} entries/minute")
     logger.info("=" * 60)
-    # Write and upload manifest of uploaded files for faster downstream processing
+    
+    # Final manifest update to ensure consistency (manifest was updated incrementally during processing)
     try:
-        # Collect all processed task IDs from the chunks
-        all_processed_tasks = set()
-        for chunk in task_chunks:
-            all_processed_tasks.update(chunk)
-        
         manifest_path = Path('data/aggregated') / f"manifest_{benchmark_name}.json"
-        manifest_data = {
-            'benchmark': benchmark_name,
-            'generated_at': datetime.now(timezone.utc).isoformat(),
-            'files': sorted(uploaded_remote_names, key=lambda x: x['chunk_number']),
-            'processed_tasks': sorted(list(all_processed_tasks)),
-            'task_count': len(all_processed_tasks),
-            'chunk_count': len(task_chunks)
-        }
-        with open(manifest_path, 'w') as fh:
-            json.dump(manifest_data, fh, indent=2)
-        logger.info(f"📦 Wrote manifest: {manifest_path} ({len(all_processed_tasks)} tasks)")
-
-        # Upload manifest to HF for downstream jobs
-        try:
-            api.upload_file(
-                path_or_fileobj=str(manifest_path),
-                path_in_repo=f"manifests/manifest_{benchmark_name}.json",
-                repo_id=args.repo_id,
-                repo_type='dataset',
-                run_as_future=False
-            )
-            logger.info(f"☁️ Uploaded manifest to HF: manifests/manifest_{benchmark_name}.json")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to upload manifest to HF: {e}")
+        if manifest_path.exists():
+            with open(manifest_path, 'r') as f:
+                manifest_data = json.load(f)
+            logger.info(f"📦 Final manifest summary: {manifest_data['task_count']} tasks, {manifest_data['chunk_count']} uploaded files")
+            logger.info(f"☁️ Manifest available at: manifests/manifest_{benchmark_name}.json")
+        else:
+            logger.warning(f"⚠️ No manifest file found at {manifest_path}")
     except Exception as e:
-        logger.warning(f"⚠️ Failed to write manifest: {e}")
+        logger.warning(f"⚠️ Error reading final manifest: {e}")
 
     return successful_uploads == len(upload_futures)
 
