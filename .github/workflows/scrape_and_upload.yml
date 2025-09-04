@@ -51,14 +51,14 @@ jobs:
           for benchmark in lite mmlu classic; do
             echo ""
             echo "🔄 Processing benchmark: $benchmark"
-            echo "📦 Using chunked processing (100 tasks per chunk)"
-            echo "⚡ Parallel processing with 4 workers per chunk"
+            echo "📦 Using chunked processing (200 tasks per chunk for optimal performance)"
+            echo "⚡ Parallel processing with 2 workers per chunk"
             echo "☁️ Concurrent uploads while processing continues"
             
             python scripts/optimized_helm_processor.py \
               --benchmark "$benchmark" \
-              --chunk-size 100 \
-              --max-workers 4 \
+              --chunk-size 200 \
+              --max-workers 2 \
               --upload-workers 2 \
               --repo-id evaleval/every_eval_ever \
               --source-name helm
