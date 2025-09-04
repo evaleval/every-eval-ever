@@ -88,5 +88,4 @@ jobs:
             --repo-id evaleval/every_eval_ever \
             --benchmarks lite mmlu classic \
             --source-name helm \
-            --max-workers 2 \
-            --timeout 3600
+            --max-workers 1
