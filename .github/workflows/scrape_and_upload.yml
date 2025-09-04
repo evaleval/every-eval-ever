@@ -7,49 +7,31 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  scrape_and_upload:
-    name: Process Evaluation Data and Upload to HuggingFace
+  scrape:
+    name: Step 1 - Scrape and Process HELM Evaluation Data
     runs-on: ubuntu-latest
-    timeout-minutes: 720  # Increased to 12 hours for aggressive parallel processing
+    timeout-minutes: 720
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Setup environment (checkout, python, deps)
+        uses: ./.github/actions/setup-environment
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install playwright huggingface_hub datasets
-          # Install browsers for Playwright (non-interactive, includes deps)
-          python -m playwright install --with-deps
-
-      - name: Process evaluation data and upload to HuggingFace (Optimized)
+      - name: Run scraping and processing
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONUNBUFFERED: 1
-          # Performance optimizations - aggressive settings for maximum speed
           OMP_NUM_THREADS: 8
           NUMBA_DISABLE_JIT: 1
           PYTHONDONTWRITEBYTECODE: 1
           PANDAS_COPY_ON_WRITE: 1
           OPENBLAS_NUM_THREADS: 8
         run: |
-          echo "🚀 Starting optimized chunked data processing workflow"
+          echo "🚀 STEP 1: SCRAPING AND PROCESSING EVALUATION DATA"
           echo "📅 Started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           echo "🖥️  Runner: ${{ runner.os }}"
           echo "🐍 Python version: $(python --version)"
           echo "💾 Available memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
           echo "⚡ Processing with optimized chunked parallel uploads for maximum performance"
-          
-          # Process benchmarks in parallel for maximum speed
-          # This processes all benchmarks simultaneously instead of sequentially
           
           echo ""
           echo "🚀 AGGRESSIVE PARALLEL PROCESSING MODE"
@@ -57,10 +39,7 @@ jobs:
           echo "⚡ Each benchmark: 8 workers, 100 tasks/chunk, 6 upload workers"
           echo "🔥 Target: Complete entire dataset in under 60 minutes"
           
-          # Start all benchmarks in parallel background processes
-          # Priority order: lite (fastest), mmlu (medium), classic (largest)
           pids=()
-          
           for benchmark in lite mmlu classic; do
             echo "🔄 Starting parallel processing for benchmark: $benchmark"
             (
@@ -76,14 +55,12 @@ jobs:
             ) &
             pids+=($!)
             echo "   📍 Started $benchmark with PID: ${pids[-1]}"
-            # Small delay to stagger startup and reduce initial resource contention
             sleep 2
           done
-          
+
           echo "⏳ Waiting for all ${#pids[@]} parallel benchmark processes to complete..."
           echo "📊 Process IDs: ${pids[*]}"
-          
-          # Wait for all background processes and capture exit codes
+
           failed_jobs=()
           for i in "${!pids[@]}"; do
             if wait "${pids[$i]}"; then
@@ -96,15 +73,12 @@ jobs:
               failed_jobs+=("${benchmark_name[$i]}")
             fi
           done
-          
+
           if [ ${#failed_jobs[@]} -eq 0 ]; then
+            echo ""
+            echo "✅ STEP 1 COMPLETED SUCCESSFULLY!"
             echo "🎉 All benchmarks processed successfully in parallel!"
-            echo "   📊 Processed: lite, mmlu, classic"
-            echo "   ⚡ Used aggressive parallelization (8 workers per benchmark)"
-            echo "   🔀 4 chunk workers for parallel chunk processing"
-            echo "   📦 100 tasks per chunk for optimal parallelization"
-            echo "   ☁️ 6 parallel uploads per benchmark"
-            echo "📅 Completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+            echo "📅 Step 1 completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           else
             echo "⚠️ Some benchmarks failed: ${failed_jobs[*]}"
             echo "📊 Check logs above for specific error details"
@@ -121,35 +95,62 @@ jobs:
             logs/
           retention-days: 7
 
-      - name: Generate and upload summary statistics  
+  generate_stats:
+    name: Step 2 - Generate and Upload Summary Statistics
+    runs-on: ubuntu-latest
+    needs: [scrape]
+    timeout-minutes: 180
+
+    steps:
+      - name: Setup environment (checkout, python, deps)
+        uses: ./.github/actions/setup-environment
+
+      - name: Run statistics generation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONUNBUFFERED: 1
         run: |
-          echo "📊 Generating comprehensive dataset statistics..."
+      echo "📥 Fetching manifests from HuggingFace to speed up stats generation..."
+      python - <<'PY'
+import os
+from huggingface_hub import HfApi, hf_hub_download
+os.makedirs('data/aggregated', exist_ok=True)
+api = HfApi(token=os.environ.get('HF_TOKEN'))
+for bm in ['lite','mmlu','classic']:
+  try:
+    # Download manifest if available
+    hf_hub_download(repo_id='${{ secrets.REPO_ID }}' if False else os.environ.get('HF_REPO_ID',''), filename=f'manifests/manifest_{bm}.json', repo_type='dataset', local_dir='data/aggregated')
+    print(f'Downloaded manifest for {bm}')
+  except Exception as e:
+    print(f'No manifest for {bm}: {e}')
+PY
+
+          echo ""
+          echo "📊 STEP 2: GENERATING COMPREHENSIVE DATASET STATISTICS"
           echo "📅 Statistics generation started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
-          
-          # Generate stats for all processed benchmarks
+
           python scripts/optimized_helm_processor.py \
             --benchmark lite \
             --generate-stats-only \
             --workers 8 \
             --upload-workers 6 \
             --no-verify
-            
+
           python scripts/optimized_helm_processor.py \
             --benchmark mmlu \
             --generate-stats-only \
             --workers 8 \
             --upload-workers 6 \
             --no-verify
-            
+
           python scripts/optimized_helm_processor.py \
             --benchmark classic \
             --generate-stats-only \
             --workers 8 \
             --upload-workers 6 \
             --no-verify
-          
+
           echo "✅ Statistics generation completed successfully"
-          echo "📅 Statistics completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          echo "📅 Step 2 completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          echo ""
+          echo "🎊 WORKFLOW COMPLETED SUCCESSFULLY!"

@@ -355,15 +355,15 @@ def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, par
         file_path = Path(local_path)
         if not file_path.exists():
             logger.error(f"❌ File not found: {local_path}")
-            return False
-        
+            return None
+
         file_size_mb = file_path.stat().st_size / (1024 * 1024)
         remote_name = f"data-{part_num:05d}.parquet"
-        
+
         logger.info(f"☁️ Uploading {file_path.name} as {remote_name} ({file_size_mb:.1f}MB)")
-        
+
         start_time = time.time()
-        
+
         # Fast upload with minimal retries for speed
         api.upload_file(
             path_or_fileobj=str(file_path),
@@ -372,22 +372,26 @@ def upload_file(api: HfApi, local_path: str, repo_id: str, source_name: str, par
             repo_type="dataset",
             run_as_future=False  # Synchronous for better error handling
         )
-        
+
         upload_time = time.time() - start_time
         speed_mbps = file_size_mb / max(upload_time, 0.001)
         logger.info(f"✅ Uploaded {remote_name} in {upload_time:.1f}s ({speed_mbps:.1f}MB/s)")
-        
+
         # Clean up local file if cleanup is enabled
         if cleanup:
-            file_path.unlink()
-            logger.info(f"🧹 Cleaned up local file: {local_path}")
+            try:
+                file_path.unlink()
+                logger.info(f"🧹 Cleaned up local file: {local_path}")
+            except Exception:
+                logger.warning(f"⚠️ Failed to remove local file: {local_path}")
         else:
             logger.info(f"📁 Preserved local file: {local_path}")
-        
-        return True
+
+        return remote_name
+
     except Exception as e:
         logger.error(f"❌ Upload failed for {local_path}: {e}")
-        return False
+        return None
 
 
 def process_with_optimization(args):
@@ -481,6 +485,7 @@ def process_with_optimization(args):
     successful_uploads = 0
     # Use the same counter for both chunk ID and part number since they're in sync
     current_number = start_number
+    uploaded_remote_names = []
     
     start_time = time.time()
     
@@ -512,7 +517,7 @@ def process_with_optimization(args):
                 upload_future = upload_executor.submit(
                     upload_file, api, chunk_file, args.repo_id, args.source_name, chunk_number, not args.no_cleanup
                 )
-                upload_futures.append(upload_future)
+                upload_futures.append((chunk_number, upload_future))
                 
                 # Update progress with detailed metrics
                 elapsed = time.time() - start_time
@@ -536,9 +541,15 @@ def process_with_optimization(args):
     
     # Wait for all uploads to complete
     logger.info(f"\n⏳ Waiting for {len(upload_futures)} uploads to complete...")
-    for future in upload_futures:
-        if future.result():
+    # Wait for all uploads and collect remote names
+    for chunk_number, future in upload_futures:
+        remote_name = future.result()
+        if remote_name:
             successful_uploads += 1
+            uploaded_remote_names.append({
+                'chunk_number': chunk_number,
+                'remote_name': remote_name
+            })
     
     upload_executor.shutdown(wait=True)
     
@@ -551,7 +562,34 @@ def process_with_optimization(args):
     logger.info(f"⏱️ Total time: {total_time/60:.1f} minutes")
     logger.info(f"📈 Rate: {(sum(len(chunk) for chunk in task_chunks) * 500) / (total_time/60):.1f} entries/minute")
     logger.info("=" * 60)
-    
+    # Write and upload manifest of uploaded files for faster downstream processing
+    try:
+        manifest_path = Path('data/aggregated') / f"manifest_{benchmark_name}.json"
+        import json
+        manifest_data = {
+            'benchmark': benchmark_name,
+            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'files': sorted(uploaded_remote_names, key=lambda x: x['chunk_number'])
+        }
+        with open(manifest_path, 'w') as fh:
+            json.dump(manifest_data, fh)
+        logger.info(f"📦 Wrote manifest: {manifest_path}")
+
+        # Upload manifest to HF for downstream jobs
+        try:
+            api.upload_file(
+                path_or_fileobj=str(manifest_path),
+                path_in_repo=f"manifests/manifest_{benchmark_name}.json",
+                repo_id=args.repo_id,
+                repo_type='dataset',
+                run_as_future=False
+            )
+            logger.info(f"☁️ Uploaded manifest to HF: manifests/manifest_{benchmark_name}.json")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to upload manifest to HF: {e}")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to write manifest: {e}")
+
     return successful_uploads == len(upload_futures)
 
 
