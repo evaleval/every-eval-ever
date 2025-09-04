@@ -260,12 +260,32 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
     logger.info(f"⏱️ Timeout: {timeout_minutes} minutes per chunk")
     logger.info(f"⚡ Workers: {workers}")
     
-    # Import the processor function directly
+    # Import the required functions
     from src.sources.helm.processor import process_line
+    from src.sources.helm.downloader import download_tasks
     
     # Create chunk output directory
     chunk_dir = Path(f"data/processed/chunk_{chunk_id:04d}")
     chunk_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Ensure downloads directory exists
+    downloads_dir = Path("data/downloads")
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Download tasks first (this was missing!)
+    logger.info(f"📥 Downloading {len(chunk_tasks)} tasks for chunk {chunk_id}...")
+    try:
+        downloaded_files = download_tasks(
+            tasks=chunk_tasks,
+            output_dir=str(downloads_dir),
+            benchmark=benchmark,
+            overwrite=False,
+            show_progress=False  # Disable progress bar for cleaner logs
+        )
+        logger.info(f"✅ Successfully downloaded {len(downloaded_files)} tasks for chunk {chunk_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to download tasks for chunk {chunk_id}: {e}")
+        return None
     
     processed_files = []
     task_file_mapping = {}  # Track which task produced which file
@@ -282,7 +302,7 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
             result = process_line(
                 line=task,
                 output_dir=str(chunk_dir),
-                benchmark="lite",  # Use a default benchmark name
+                benchmark=benchmark,  # Use the actual benchmark parameter
                 downloads_dir="data/downloads",
                 keep_temp_files=False,
                 overwrite=False,
