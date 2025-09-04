@@ -34,7 +34,15 @@ import logging
 import pandas as pd
 
 from huggingface_hub import HfApi
-from datasets import load_dataset
+
+# Try to import datasets library for efficient duplicate detection
+try:
+    from datasets import load_dataset
+    DATASETS_AVAILABLE = True
+except ImportError:
+    DATASETS_AVAILABLE = False
+    logger = logging.getLogger(__name__)  # Temporary logger for this warning
+    logger.warning("⚠️ datasets library not available - duplicate detection will be disabled")
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -82,6 +90,12 @@ def get_existing_files(api: HfApi, repo_id: str) -> set:
 def get_processed_tasks(api: HfApi, repo_id: str, benchmark: str) -> set:
     """Get set of tasks that have already been processed for this benchmark using efficient lazy loading."""
     processed_tasks = set()
+    
+    if not DATASETS_AVAILABLE:
+        logger.warning("⚠️ datasets library not available - skipping duplicate detection")
+        logger.info("📝 All tasks will be processed (install 'datasets' library for duplicate detection)")
+        return processed_tasks
+    
     try:
         # Check if the dataset exists and has data
         try:

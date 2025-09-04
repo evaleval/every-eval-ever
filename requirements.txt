@@ -6,3 +6,4 @@ playwright~=1.55.0
 numpy<2,>=1.25
 pyarrow~=12.0.0
 huggingface_hub~=0.18.0
+datasets~=2.14.0
