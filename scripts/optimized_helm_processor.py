@@ -771,7 +771,7 @@ def main():
     parser.add_argument("--max-workers", type=int, default=8, help="Workers per chunk (default: 8)")
     parser.add_argument("--upload-workers", type=int, default=6, help="Parallel upload workers (default: 6)")
     parser.add_argument("--chunk-workers", type=int, default=4, help="Parallel chunk processing workers (default: 4)")
-    parser.add_argument("--timeout", type=int, default=30, help="Timeout per chunk in minutes (default: 30, aggressive for speed)")
+    parser.add_argument("--timeout", type=int, default=90, help="Timeout per chunk in minutes (default: 90, allows for network delays)")
     parser.add_argument("--repo-id", type=str, required=True, help="HuggingFace dataset repository ID")
     parser.add_argument("--source-name", type=str, default="helm", help="Source name for file organization")
     parser.add_argument("--adapter-method", type=str, help="Filter tasks by adapter method")
