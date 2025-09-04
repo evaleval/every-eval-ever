@@ -1,7 +1,20 @@
+# Data directories
 /data/
-/helm_processor.log
+
+# Log files
+*.log
+
+# Data files
 *.csv
 *.parquet
+
+# Performance test results
+performance_*.txt
+performance_*.json
+
+# Demo and test files
+demo_*.py
+test_*.py
 
 # Byte-compiled / cache
 __pycache__/
@@ -10,3 +23,13 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

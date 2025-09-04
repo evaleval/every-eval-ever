@@ -35,7 +35,8 @@ import pandas as pd
 from huggingface_hub import HfApi
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 from src.utils.logging_config import setup_logging
 
@@ -273,11 +274,56 @@ def main():
     
     # Auto-detect CSV file if not provided
     if not args.csv_file:
-        csv_path = Path("data/benchmark_lines") / f"{args.benchmark}.csv"
+        # Use absolute path relative to project root
+        benchmark_lines_dir = project_root / "data" / "benchmark_lines"
+        
+        # Try HELM naming convention first: helm_{benchmark}.csv
+        csv_path = benchmark_lines_dir / f"helm_{args.benchmark}.csv"
+        if not csv_path.exists():
+            # Fallback to simple naming: {benchmark}.csv
+            csv_path = benchmark_lines_dir / f"{args.benchmark}.csv"
+        
+        # If CSV file doesn't exist, generate it using web scraper
+        if not csv_path.exists():
+            logger.info(f"📥 CSV file not found, generating it by scraping HELM data for benchmark: {args.benchmark}")
+            try:
+                # Import and run the web scraper to create the CSV
+                import asyncio
+                import sys
+                sys.path.insert(0, str(project_root))
+                from src.sources.helm.web_scraper import main as create_csv_main
+                
+                # Create the benchmark_lines directory if it doesn't exist
+                benchmark_lines_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Run the web scraper
+                asyncio.run(create_csv_main(benchmark=args.benchmark, output_dir=str(benchmark_lines_dir)))
+                
+                # Check if the file was created successfully
+                csv_path = benchmark_lines_dir / f"helm_{args.benchmark}.csv"
+                if csv_path.exists():
+                    logger.info(f"✅ Successfully generated CSV: {csv_path}")
+                else:
+                    logger.error(f"❌ CSV generation failed - file not found after scraping")
+                    return 1
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to generate CSV for benchmark '{args.benchmark}': {e}")
+                return 1
+        
         if csv_path.exists():
             args.csv_file = str(csv_path)
+            logger.info(f"📄 Using CSV file: {csv_path}")
         else:
-            logger.error(f"❌ CSV file not found: {csv_path}")
+            logger.error(f"❌ CSV file not found. Tried:")
+            logger.error(f"   - {benchmark_lines_dir}/helm_{args.benchmark}.csv")
+            logger.error(f"   - {benchmark_lines_dir}/{args.benchmark}.csv")
+            logger.error(f"📁 Available files in {benchmark_lines_dir}:")
+            if benchmark_lines_dir.exists():
+                for file in benchmark_lines_dir.iterdir():
+                    logger.error(f"   - {file.name}")
+            else:
+                logger.error(f"   Directory does not exist: {benchmark_lines_dir}")
             return 1
     
     # Set up HuggingFace API
