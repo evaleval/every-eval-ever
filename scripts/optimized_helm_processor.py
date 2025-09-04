@@ -320,6 +320,8 @@ def process_chunk(chunk_tasks: List[str], chunk_id: int, workers: int, timeout_m
         logger.error(f"❌ No files processed in chunk {chunk_id}")
         return None
     
+    logger.info(f"🔄 Starting parquet creation for chunk {chunk_id} with {len(processed_files)} files...")
+    
     # Combine all processed files into one parquet file
     try:
         combined_data = []
@@ -628,13 +630,27 @@ def process_with_optimization(args):
     
     # Process completed chunks as they finish and submit for upload
     completed_chunks = 0
+    logger.info(f"🔄 Starting to wait for {len(chunk_futures)} chunk futures to complete...")
+    
+    # Use as_completed to handle chunks as they finish (regardless of order)
+    from concurrent.futures import as_completed
+    
+    # Create a mapping from future to chunk info
+    future_to_chunk = {}
     for chunk_idx, chunk_future, chunk_number in chunk_futures:
+        future_to_chunk[chunk_future] = (chunk_idx, chunk_number)
+    
+    # Process chunks as they complete (not in order)
+    for chunk_future in as_completed([f for _, f, _ in chunk_futures], timeout=args.timeout * 60 * len(chunk_futures)):
+        chunk_idx, chunk_number = future_to_chunk[chunk_future]
+        
         try:
-            logger.info(f"⏳ Waiting for chunk {chunk_idx+1} (ID: {chunk_number}) to complete...")
+            logger.info(f"⏳ Chunk {chunk_idx+1} (ID: {chunk_number}) has completed, getting result...")
             
-            # Add timeout to chunk processing
-            chunk_file = chunk_future.result(timeout=args.timeout * 60)  # Convert minutes to seconds
+            chunk_file = chunk_future.result()  # No timeout needed since it's already complete
             completed_chunks += 1
+            
+            logger.info(f"🎯 Chunk {chunk_idx+1} (ID: {chunk_number}) result: {chunk_file}")
             
             if chunk_file:
                 logger.info(f"✅ Chunk {chunk_idx+1} (ID: {chunk_number}) completed successfully: {chunk_file}")
@@ -650,6 +666,7 @@ def process_with_optimization(args):
                     upload_file, api, chunk_file, args.repo_id, args.source_name, chunk_number, not args.no_cleanup
                 )
                 upload_futures.append((chunk_number, upload_future))
+                logger.info(f"📤 Upload future created for chunk {chunk_number}, total pending uploads: {len(upload_futures)}")
                 
                 # Update progress with detailed metrics
                 elapsed = time.time() - start_time
@@ -665,8 +682,6 @@ def process_with_optimization(args):
             else:
                 logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed: no output file generated")
                 
-        except TimeoutError:
-            logger.error(f"⏰ Chunk {chunk_idx+1} (ID: {chunk_number}) timed out after {args.timeout} minutes")
         except Exception as e:
             logger.error(f"❌ Chunk {chunk_idx+1} (ID: {chunk_number}) failed with error: {e}")
     
@@ -675,10 +690,13 @@ def process_with_optimization(args):
     
     # Wait for all uploads to complete
     logger.info(f"\n⏳ Waiting for {len(upload_futures)} uploads to complete...")
+    if len(upload_futures) == 0:
+        logger.warning("⚠️ No upload futures found - this means no chunks completed successfully")
+    
     # Wait for all uploads and collect remote names
-    for chunk_number, future in upload_futures:
+    for i, (chunk_number, future) in enumerate(upload_futures, 1):
         try:
-            logger.info(f"⏳ Waiting for upload of chunk {chunk_number}...")
+            logger.info(f"⏳ Waiting for upload {i}/{len(upload_futures)} of chunk {chunk_number}...")
             remote_name = future.result(timeout=300)  # 5 minute timeout per upload
             if remote_name:
                 successful_uploads += 1
