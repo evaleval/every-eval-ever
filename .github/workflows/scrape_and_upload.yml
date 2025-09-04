@@ -10,7 +10,7 @@ jobs:
   scrape:
     name: Step 1 - Scrape and Process HELM Evaluation Data
     runs-on: ubuntu-latest
-    timeout-minutes: 720
+    timeout-minutes: 1440  # 24 hours - increased for processing all benchmarks in parallel
 
     steps:
       - name: Checkout repository
