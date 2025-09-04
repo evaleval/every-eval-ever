@@ -44,11 +44,6 @@ jobs:
           echo "🎯 Target: Clean architecture with unique chunk numbers"
           
           echo "🔄 Starting global processing across all benchmarks"
-          python scripts/simple_helm_processor.py \
-            --repo-id "${HF_REPO_ID}" \
-            --chunk-size 100 \
-            --max-workers 4 \
-            --source-name helm
           
           echo "⏳ Processing will handle all benchmarks globally..."
           
