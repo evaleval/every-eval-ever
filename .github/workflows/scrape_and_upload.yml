@@ -115,7 +115,12 @@ jobs:
           PYTHONUNBUFFERED: 1
         run: |
           echo "📥 Fetching manifests from HuggingFace to speed up stats generation..."
-          python -c "import os; from huggingface_hub import hf_hub_download; os.makedirs('data/aggregated', exist_ok=True); repo_id = os.environ.get('HF_REPO_ID'); [print(f'Downloaded manifest for helm_{bm}') if hf_hub_download(repo_id=repo_id, filename=f'manifests/manifest_helm_{bm}.json', repo_type='dataset', local_dir='data/aggregated') or True else print(f'No manifest for helm_{bm}') for bm in ['lite','mmlu','classic']]" || echo "⚠️ Some manifests not found, continuing..."
+          
+          # Download each manifest individually using the same logic as the script
+          for benchmark in lite mmlu classic; do
+            echo "Downloading manifest for helm_${benchmark}..."
+            python -c "import os, shutil; from pathlib import Path; from huggingface_hub import hf_hub_download; os.makedirs('data/aggregated', exist_ok=True); repo_id = os.environ.get('HF_REPO_ID'); manifest_file = hf_hub_download(repo_id=repo_id, filename='manifests/manifest_helm_${benchmark}.json', repo_type='dataset', local_dir='data', local_dir_use_symlinks=False); shutil.copy2(manifest_file, Path('data/aggregated') / 'manifest_helm_${benchmark}.json'); print('Downloaded manifest for helm_${benchmark}')" || echo "Manifest not found for helm_${benchmark}"
+          done
 
           echo ""
           echo "📊 STEP 2: GENERATING COMPREHENSIVE DATASET STATISTICS"
