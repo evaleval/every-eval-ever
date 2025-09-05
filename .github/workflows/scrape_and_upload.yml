@@ -90,12 +90,25 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: evaleval/every_eval_ever
+          STATS_REPO_ID: evaleval/every_eval_score_ever
           PYTHONUNBUFFERED: 1
         run: |
           echo ""
           echo "📊 STEP 2: GENERATING COMPREHENSIVE DATASET STATISTICS"
           echo "📅 Statistics generation started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
-          echo "✅ Statistics are generated automatically during processing in Step 1"
+          
+          echo "📊 Using datasets library for efficient statistics generation"
+          
+          if python scripts/simple_stats_generator.py \
+            --repo-id "${HF_REPO_ID}" \
+            --stats-repo-id "${STATS_REPO_ID}" \
+            --source-name helm; then
+            echo "✅ Statistics generation completed successfully!"
+          else
+            echo "❌ Statistics generation failed"
+            exit 1
+          fi
+          
           echo "📅 Step 2 completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           echo ""
           echo "🎊 WORKFLOW COMPLETED SUCCESSFULLY!"
