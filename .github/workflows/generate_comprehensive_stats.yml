@@ -76,9 +76,9 @@ jobs:
                   repo_type='dataset'
               )
               
-              # Look for statistics.parquet and metadata.json files
-              stats_file = 'statistics.parquet'
-              metadata_file = 'metadata.json'
+              # Look for detailed_statistics.parquet and detailed_metadata.json files
+              stats_file = 'detailed_statistics.parquet'
+              metadata_file = 'detailed_metadata.json'
               
               if stats_file in files and metadata_file in files:
                   print(f'✅ Found comprehensive statistics files:')

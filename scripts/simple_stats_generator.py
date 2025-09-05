@@ -67,99 +67,52 @@ def generate_comprehensive_stats(repo_id: str, stats_repo_id: str, source_name: 
                 f"{stats['overview']['total_models']:,} models, "
                 f"{stats['overview']['total_datasets']:,} datasets")
     
-    # Model performance statistics
-    if 'model_name' in df.columns and 'evaluation_score' in df.columns:
-        model_stats = []
-        
-        for model_name, model_group in df.groupby('model_name'):
-            scores = model_group['evaluation_score'].dropna()
-            if len(scores) > 0:
-                model_stat = {
-                    'model_name': model_name,
-                    'total_evaluations': len(scores),
-                    'mean_score': float(scores.mean()),
-                    'median_score': float(scores.median()),
-                    'std_score': float(scores.std()) if len(scores) > 1 else 0.0,
-                    'min_score': float(scores.min()),
-                    'max_score': float(scores.max()),
-                    'datasets_evaluated': model_group['dataset_name'].nunique() if 'dataset_name' in model_group.columns else 0
-                }
-                model_stats.append(model_stat)
-        
-        # Sort by mean score
-        model_stats.sort(key=lambda x: x['mean_score'], reverse=True)
-        stats['model_performance'] = model_stats
-        logger.info(f"📊 Generated performance stats for {len(model_stats)} models")
+    # Main statistics: per benchmark+dataset+model combination
+    detailed_stats = []
     
-    # Dataset statistics
-    if 'dataset_name' in df.columns and 'evaluation_score' in df.columns:
-        dataset_stats = []
+    if all(col in df.columns for col in ['benchmark', 'dataset_name', 'model_name', 'evaluation_score']):
+        logger.info("📊 Generating detailed benchmark+dataset+model statistics...")
         
-        for dataset_name, dataset_group in df.groupby('dataset_name'):
-            scores = dataset_group['evaluation_score'].dropna()
-            if len(scores) > 0:
-                dataset_stat = {
-                    'dataset_name': dataset_name,
-                    'total_evaluations': len(scores),
-                    'mean_score': float(scores.mean()),
-                    'median_score': float(scores.median()),
-                    'std_score': float(scores.std()) if len(scores) > 1 else 0.0,
-                    'min_score': float(scores.min()),
-                    'max_score': float(scores.max()),
-                    'models_evaluated': dataset_group['model_name'].nunique() if 'model_name' in dataset_group.columns else 0
-                }
-                dataset_stats.append(dataset_stat)
+        # Group by benchmark, dataset, and model
+        grouped = df.groupby(['benchmark', 'dataset_name', 'model_name'])
         
-        # Sort by number of evaluations
-        dataset_stats.sort(key=lambda x: x['total_evaluations'], reverse=True)
-        stats['dataset_statistics'] = dataset_stats
-        logger.info(f"📊 Generated dataset stats for {len(dataset_stats)} datasets")
-    
-    # Benchmark-specific statistics
-    if 'benchmark' in df.columns:
-        benchmark_stats = []
-        
-        for benchmark, benchmark_group in df.groupby('benchmark'):
-            benchmark_stat = {
-                'benchmark': benchmark,
-                'total_records': len(benchmark_group),
-                'unique_models': benchmark_group['model_name'].nunique() if 'model_name' in benchmark_group.columns else 0,
-                'unique_datasets': benchmark_group['dataset_name'].nunique() if 'dataset_name' in benchmark_group.columns else 0,
-            }
-            
-            if 'evaluation_score' in benchmark_group.columns:
-                scores = benchmark_group['evaluation_score'].dropna()
-                if len(scores) > 0:
-                    benchmark_stat.update({
-                        'mean_score': float(scores.mean()),
-                        'median_score': float(scores.median()),
-                        'std_score': float(scores.std()) if len(scores) > 1 else 0.0
-                    })
-            
-            benchmark_stats.append(benchmark_stat)
-        
-        stats['benchmark_statistics'] = benchmark_stats
-        logger.info(f"📊 Generated benchmark stats for {len(benchmark_stats)} benchmarks")
-    
-    # Top performing model-dataset combinations
-    if 'model_name' in df.columns and 'dataset_name' in df.columns and 'evaluation_score' in df.columns:
-        top_combinations = []
-        
-        for (model, dataset), group in df.groupby(['model_name', 'dataset_name']):
+        for (benchmark, dataset_name, model_name), group in grouped:
             scores = group['evaluation_score'].dropna()
+            
             if len(scores) > 0:
-                combination = {
-                    'model_name': model,
-                    'dataset_name': dataset,
+                # Calculate statistics for this specific combination
+                stat_record = {
+                    'benchmark': benchmark,
+                    'dataset_name': dataset_name,
+                    'model_name': model_name,
+                    'evaluation_count': len(scores),
                     'mean_score': float(scores.mean()),
-                    'evaluations': len(scores)
+                    'median_score': float(scores.median()),
+                    'std_score': float(scores.std()) if len(scores) > 1 else 0.0,
+                    'min_score': float(scores.min()),
+                    'max_score': float(scores.max()),
+                    'first_evaluation': group['timestamp'].min() if 'timestamp' in group.columns else None,
+                    'last_evaluation': group['timestamp'].max() if 'timestamp' in group.columns else None,
+                    'source': group['source'].iloc[0] if 'source' in group.columns else source_name,
+                    'unique_tasks': group['task_id'].nunique() if 'task_id' in group.columns else len(group),
+                    'generation_timestamp': datetime.now().isoformat()
                 }
-                top_combinations.append(combination)
+                
+                # Add percentiles if we have enough data
+                if len(scores) >= 4:
+                    stat_record['p25_score'] = float(scores.quantile(0.25))
+                    stat_record['p75_score'] = float(scores.quantile(0.75))
+                else:
+                    stat_record['p25_score'] = stat_record['min_score']
+                    stat_record['p75_score'] = stat_record['max_score']
+                
+                detailed_stats.append(stat_record)
         
-        # Sort by mean score and take top 100
-        top_combinations.sort(key=lambda x: x['mean_score'], reverse=True)
-        stats['top_combinations'] = top_combinations[:100]
-        logger.info(f"📊 Generated top 100 model-dataset combinations")
+        logger.info(f"📊 Generated {len(detailed_stats)} benchmark+dataset+model combinations")
+    else:
+        logger.warning("⚠️ Missing required columns for detailed statistics")
+    
+    stats['detailed_performance'] = detailed_stats
     
     return stats
 
@@ -168,64 +121,126 @@ def create_summary_dataset(stats: Dict[str, Any], stats_repo_id: str, api: HfApi
     """Create a summary dataset from the statistics."""
     
     try:
-        # Create model performance DataFrame
-        if 'model_performance' in stats:
-            model_df = pd.DataFrame(stats['model_performance'])
-            model_df['record_type'] = 'model_performance'
-            model_df['generation_timestamp'] = stats['overview']['generation_timestamp']
+        # Create the main detailed performance DataFrame
+        if 'detailed_performance' in stats and stats['detailed_performance']:
+            detailed_df = pd.DataFrame(stats['detailed_performance'])
+            logger.info(f"📊 Created detailed performance DataFrame with {len(detailed_df):,} rows")
         else:
-            model_df = pd.DataFrame()
-        
-        # Create dataset statistics DataFrame  
-        if 'dataset_statistics' in stats:
-            dataset_df = pd.DataFrame(stats['dataset_statistics'])
-            dataset_df['record_type'] = 'dataset_statistics'
-            dataset_df['generation_timestamp'] = stats['overview']['generation_timestamp']
-        else:
-            dataset_df = pd.DataFrame()
-        
-        # Create top combinations DataFrame
-        if 'top_combinations' in stats:
-            combinations_df = pd.DataFrame(stats['top_combinations'])
-            combinations_df['record_type'] = 'top_combinations'
-            combinations_df['generation_timestamp'] = stats['overview']['generation_timestamp']
-        else:
-            combinations_df = pd.DataFrame()
-        
-        # Combine all DataFrames
-        all_dfs = [df for df in [model_df, dataset_df, combinations_df] if not df.empty]
-        
-        if not all_dfs:
-            logger.warning("⚠️ No statistics data to upload")
+            logger.warning("⚠️ No detailed performance data to upload")
             return False
         
-        combined_df = pd.concat(all_dfs, ignore_index=True, sort=False)
-        
         # Save to parquet
-        output_file = Path("summary_statistics.parquet")
-        combined_df.to_parquet(output_file, compression='snappy', index=False)
+        output_file = Path("detailed_statistics.parquet")
+        detailed_df.to_parquet(output_file, compression='snappy', index=False)
         
-        logger.info(f"📤 Uploading {len(combined_df):,} summary records to {stats_repo_id}")
+        logger.info(f"📤 Uploading {len(detailed_df):,} detailed performance records to {stats_repo_id}")
         
         # Upload to HuggingFace
         api.upload_file(
             path_or_fileobj=str(output_file),
-            path_in_repo="statistics.parquet",
+            path_in_repo="detailed_statistics.parquet",
             repo_id=stats_repo_id,
             repo_type="dataset"
         )
         
-        # Upload metadata as well
-        metadata_file = Path("summary_metadata.json")
+        # Create and upload overview metadata
+        metadata = {
+            'overview': stats['overview'],
+            'detailed_stats_summary': {
+                'total_combinations': len(detailed_df),
+                'benchmarks': sorted(detailed_df['benchmark'].unique().tolist()) if 'benchmark' in detailed_df.columns else [],
+                'models': detailed_df['model_name'].nunique() if 'model_name' in detailed_df.columns else 0,
+                'datasets': detailed_df['dataset_name'].nunique() if 'dataset_name' in detailed_df.columns else 0,
+                'top_performing_combinations': detailed_df.nlargest(10, 'mean_score')[
+                    ['benchmark', 'dataset_name', 'model_name', 'mean_score']
+                ].to_dict('records') if len(detailed_df) > 0 else [],
+                'worst_performing_combinations': detailed_df.nsmallest(10, 'mean_score')[
+                    ['benchmark', 'dataset_name', 'model_name', 'mean_score']
+                ].to_dict('records') if len(detailed_df) > 0 else []
+            }
+        }
+        
+        metadata_file = Path("detailed_metadata.json")
         with open(metadata_file, 'w') as f:
-            json.dump({
-                'overview': stats['overview'],
-                'benchmark_statistics': stats.get('benchmark_statistics', [])
-            }, f, indent=2)
+            json.dump(metadata, f, indent=2)
         
         api.upload_file(
             path_or_fileobj=str(metadata_file),
-            path_in_repo="metadata.json",
+            path_in_repo="detailed_metadata.json",
+            repo_id=stats_repo_id,
+            repo_type="dataset"
+        )
+        
+        # Also create a README for the stats repository
+        readme_content = f"""# Evaluation Statistics Dataset
+
+This dataset contains detailed performance statistics for AI model evaluations.
+
+## Structure
+
+### Main Data File: `detailed_statistics.parquet`
+Each row represents a unique combination of:
+- **benchmark**: The evaluation benchmark (lite, mmlu, classic)
+- **dataset_name**: The specific dataset within the benchmark
+- **model_name**: The AI model being evaluated
+
+### Columns:
+- `benchmark`: Evaluation benchmark name
+- `dataset_name`: Dataset name
+- `model_name`: Model name  
+- `evaluation_count`: Number of evaluations for this combination
+- `mean_score`: Average evaluation score
+- `median_score`: Median evaluation score
+- `std_score`: Standard deviation of scores
+- `min_score`: Minimum score
+- `max_score`: Maximum score
+- `p25_score`: 25th percentile score
+- `p75_score`: 75th percentile score
+- `first_evaluation`: Timestamp of first evaluation
+- `last_evaluation`: Timestamp of most recent evaluation
+- `source`: Data source (e.g., "helm")
+- `unique_tasks`: Number of unique tasks evaluated
+- `generation_timestamp`: When this statistics record was generated
+
+## Summary
+- **Total combinations**: {metadata['detailed_stats_summary']['total_combinations']:,}
+- **Unique models**: {metadata['detailed_stats_summary']['models']:,}
+- **Unique datasets**: {metadata['detailed_stats_summary']['datasets']:,}
+- **Benchmarks**: {', '.join(metadata['detailed_stats_summary']['benchmarks'])}
+- **Generated**: {metadata['overview']['generation_timestamp']}
+
+## Usage Example
+
+```python
+from datasets import load_dataset
+import pandas as pd
+
+# Load the statistics dataset
+dataset = load_dataset("evaleval/every_eval_score_ever")
+stats_df = pd.DataFrame(dataset['train'])
+
+# Find top performing models on a specific dataset
+mmlu_results = stats_df[
+    (stats_df['benchmark'] == 'mmlu') & 
+    (stats_df['dataset_name'] == 'some_dataset')
+].sort_values('mean_score', ascending=False)
+
+# Compare model performance across benchmarks
+model_comparison = stats_df[
+    stats_df['model_name'] == 'some_model'
+].groupby('benchmark')['mean_score'].mean()
+```
+
+Updated: {datetime.now().isoformat()}
+"""
+        
+        readme_file = Path("README.md")
+        with open(readme_file, 'w') as f:
+            f.write(readme_content)
+        
+        api.upload_file(
+            path_or_fileobj=str(readme_file),
+            path_in_repo="README.md",
             repo_id=stats_repo_id,
             repo_type="dataset"
         )
@@ -233,8 +248,10 @@ def create_summary_dataset(stats: Dict[str, Any], stats_repo_id: str, api: HfApi
         # Cleanup
         output_file.unlink(missing_ok=True)
         metadata_file.unlink(missing_ok=True)
+        readme_file.unlink(missing_ok=True)
         
-        logger.info(f"✅ Successfully uploaded summary statistics to {stats_repo_id}")
+        logger.info(f"✅ Successfully uploaded detailed statistics to {stats_repo_id}")
+        logger.info(f"📊 {len(detailed_df):,} benchmark+dataset+model combinations")
         return True
         
     except Exception as e:

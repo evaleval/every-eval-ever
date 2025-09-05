@@ -104,6 +104,7 @@ jobs:
             --stats-repo-id "${STATS_REPO_ID}" \
             --source-name helm; then
             echo "✅ Statistics generation completed successfully!"
+            echo "📊 Generated detailed benchmark+dataset+model statistics"
           else
             echo "❌ Statistics generation failed"
             exit 1
