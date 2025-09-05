@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -244,6 +245,12 @@ def process_chunk(chunk: Dict, workers: int, source: str = "helm") -> str:
     downloads_dir = Path("data/downloads")
     downloads_dir.mkdir(parents=True, exist_ok=True)
     
+    # Clean up any previous downloads to save space
+    import shutil
+    if downloads_dir.exists():
+        shutil.rmtree(downloads_dir, ignore_errors=True)
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+    
     all_processed_files = []
     task_file_mapping = {}
     
@@ -304,6 +311,17 @@ def process_chunk(chunk: Dict, workers: int, source: str = "helm") -> str:
                     'task': task, 
                     'benchmark': task_benchmark
                 }
+        
+        # Clean up downloads for this benchmark to save space
+        benchmark_download_pattern = downloads_dir.glob(f"*{benchmark}*")
+        for download_file in benchmark_download_pattern:
+            try:
+                if download_file.is_file():
+                    download_file.unlink()
+                elif download_file.is_dir():
+                    shutil.rmtree(download_file, ignore_errors=True)
+            except Exception:
+                pass  # Ignore cleanup errors
     
     logger.info(f"📊 Chunk {chunk_id}: {len(all_processed_files)} successful tasks")
     
@@ -338,6 +356,9 @@ def process_chunk(chunk: Dict, workers: int, source: str = "helm") -> str:
         # Combine all dataframes
         combined_df = pd.concat(combined_data, ignore_index=True, copy=False, sort=False)
         
+        # Free up memory from individual dataframes
+        del combined_data
+        
         # Reorder columns to put metadata first
         metadata_cols = ['unique_id', 'task_id', 'source', 'benchmark', 'timestamp', 'processing_date']
         other_cols = [col for col in combined_df.columns if col not in metadata_cols]
@@ -349,6 +370,19 @@ def process_chunk(chunk: Dict, workers: int, source: str = "helm") -> str:
         output_file = agg_dir / f"chunk_{chunk_id:04d}.parquet"
         
         combined_df.to_parquet(output_file, compression='snappy', index=False, engine='pyarrow')
+        
+        # Clean up all processed CSV files immediately to save space
+        for file_path in all_processed_files:
+            try:
+                Path(file_path).unlink(missing_ok=True)
+            except Exception:
+                pass  # Ignore cleanup errors
+        
+        # Clean up chunk directory
+        try:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+        except Exception:
+            pass  # Ignore cleanup errors
         
         logger.info(f"✅ Created chunk parquet: {output_file} ({len(combined_df)} entries)")
         return str(output_file)

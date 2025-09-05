@@ -35,12 +35,13 @@ jobs:
           echo "🖥️  Runner: ${{ runner.os }}"
           echo "🐍 Python version: $(python --version)"
           echo "💾 Available memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
+          echo "💿 Disk space: $(df -h / | tail -1 | awk '{print $4}' ) available"
           echo "⚡ Processing with simplified global deduplication"
           
           echo ""
           echo "🚀 SIMPLIFIED PROCESSING MODE"
-          echo "� Global deduplication across all benchmarks"
-          echo "⚡ 4 parallel workers, 100 tasks/chunk"
+          echo "📦 Small chunks for GitHub Actions disk limits"
+          echo "⚡ 2 parallel workers, 25 tasks/chunk"
           echo "🎯 Target: Clean architecture with unique chunk numbers"
           
           echo "🔄 Starting global processing across all benchmarks"
@@ -49,8 +50,8 @@ jobs:
           
           if python scripts/simple_helm_processor.py \
             --repo-id "${HF_REPO_ID}" \
-            --chunk-size 100 \
-            --max-workers 4 \
+            --chunk-size 25 \
+            --max-workers 2 \
             --source-name helm; then
             echo ""
             echo "✅ STEP 1 COMPLETED SUCCESSFULLY!"
