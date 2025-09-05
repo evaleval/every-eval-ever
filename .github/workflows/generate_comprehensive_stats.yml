@@ -38,19 +38,20 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONUNBUFFERED: 1
         run: |
-          # Generate comprehensive statistics by downloading and processing
-          # all data shards incrementally to avoid memory issues
+          # Generate comprehensive statistics using datasets library directly
+          # Much more efficient and reliable than manual shard processing
           
           echo "🚀 Starting comprehensive statistics generation for all sources"
-          echo "📝 Note: This is a fallback workflow - stats are now generated automatically after scraping"
+          echo "📝 Using datasets library for efficient data loading"
           echo "📅 Started at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           echo "🖥️  Runner: ${{ runner.os }}"
-          echo "📊 This will process all uploaded data shards incrementally"
-          echo "⚡ Memory efficient: processes one shard at a time"
+          echo "📊 This will load the complete dataset using datasets library"
+          echo "⚡ Memory efficient: leverages datasets streaming capabilities"
           
-          python scripts/generate_comprehensive_stats.py \
-            --main-repo-id evaleval/every_eval_ever \
-            --stats-repo-id evaleval/every_eval_score_ever
+          python scripts/simple_stats_generator.py \
+            --repo-id evaleval/every_eval_ever \
+            --stats-repo-id evaleval/every_eval_score_ever \
+            --source-name helm
           
           echo "📅 Completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
 
@@ -75,16 +76,18 @@ jobs:
                   repo_type='dataset'
               )
               
-              # Look for stats files with new naming pattern: {source}-{index}.parquet
-              stats_files = [f for f in files if f.endswith('.parquet') and '-' in f]
+              # Look for statistics.parquet and metadata.json files
+              stats_file = 'statistics.parquet'
+              metadata_file = 'metadata.json'
               
-              if stats_files:
-                  print(f'✅ Found {len(stats_files)} comprehensive statistics files')
-                  print('📁 Recent stats files:')
-                  for f in sorted(stats_files)[-5:]:  # Show last 5
-                      print(f'   📄 {f}')
+              if stats_file in files and metadata_file in files:
+                  print(f'✅ Found comprehensive statistics files:')
+                  print(f'   📄 {stats_file}')
+                  print(f'   📄 {metadata_file}')
+                  print('🎉 Statistics generation completed successfully!')
               else:
-                  print('⚠️ No comprehensive statistics files found')
+                  print('⚠️ Expected statistics files not found')
+                  print(f'📁 Available files: {files}')
                   
           except Exception as e:
               print(f'❌ Validation failed: {e}')
