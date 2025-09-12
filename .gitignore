@@ -4,6 +4,9 @@
 # But allow test examples
 !/tests/examples/
 
+# External schemas (linked to other repos, do not commit)
+/external_schemas/
+
 # Log files
 *.log
 

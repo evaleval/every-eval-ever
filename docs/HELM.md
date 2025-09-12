@@ -1,102 +1,238 @@
 # HELM Data Source
 
-**HELM (Holistic Evaluation of Language Models)** provides comprehensive evaluation data across multiple models and datasets. This document covers the HELM-specific processing pipeline.
+**HELM (Holistic Evaluation of Language Models)** provides comprehensive evaluation data across multiple models and datasets. This source is fully integrated with the EvalHub schema format.
 
-## Quick Start
-
-To get started with HELM data immediately:
+## 🚀 Quick Start
 
 ```bash
-python main.py helm --benchmark lite
+# Test processing
+python scripts/simple_helm_processor_evalhub.py --test-run
+
+# Full processing 
+python scripts/simple_helm_processor_evalhub.py --repo-id evaleval/every_eval_ever
+
+# GitHub Actions (automated weekly)
+# See .github/workflows/scrape_and_upload.yml
 ```
 
-Or try other HELM benchmarks:
+## 📊 HELM Output Format
 
+All HELM evaluations are processed into EvalHub-compliant individual JSON files:
+
+```json
+{
+  "evaluation_id": "mmlu:subject=clinical_knowledge,method=multiple_choice_joint,model=01-ai_yi-6b",
+  "benchmark": "mmlu",
+  "model_info": {
+    "model_name": "01-ai/yi-6b",
+    "model_family": "yi"
+  },
+  "instance_result": {
+    "instance_id": 123,
+    "input": "A lesion causing compression of the facial nerve at the stylomastoid foramen will cause ipsilateral",
+    "output": "paralysis of the muscles of facial expression.",
+    "references": ["paralysis of the muscles of facial expression."],
+    "score": 1.0,
+    "is_correct": true
+  },
+  "source": "helm"
+}
+```
+
+## 📁 File Organization
+
+Individual files are saved in nested structure:
+```
+data/evaluations/helm/
+├── mmlu/
+│   ├── clinical_knowledge/
+│   │   ├── HELM_mmlu_clinical_knowledge_eval123_inst456.json
+│   │   └── HELM_mmlu_clinical_knowledge_eval124_inst457.json
+│   └── philosophy/
+│       └── HELM_mmlu_philosophy_eval125_inst458.json
+└── hellaswag/
+    └── default/
+        └── HELM_hellaswag_default_eval126_inst459.json
+```
+
+## ⚡ Performance Features
+
+### Individual File Benefits
+- **O(1) Deduplication**: File existence check, no database queries
+- **Perfect Parallelization**: Each file processes independently  
+- **Efficient Updates**: Only process new evaluations
+- **HuggingFace Compatible**: Can aggregate to datasets format
+
+### Processing Configuration
 ```bash
-python main.py helm --benchmark mmlu
-python main.py helm --benchmark classic
+python scripts/simple_helm_processor_evalhub.py \
+  --repo-id evaleval/every_eval_ever \
+  --chunk-size 25 \
+  --max-workers 2 \
+  --source-name helm
 ```
 
-The system will automatically:
-1. Scrape the HELM website to discover all available evaluations
-2. Download the raw data files from HELM's storage
-3. Convert everything to standardized CSV format
+## 🔧 Implementation Details
 
-## Available HELM Benchmarks
+### Core Functions
 
-- **`lite`**: A smaller subset for quick testing and development
-- **`mmlu`**: Massive Multitask Language Understanding benchmark
-- **`classic`**: Core evaluation tasks from classic NLP benchmarks
+#### `_create_evaluation_result()`
+Converts HELM data to EvalHub format:
+- Maps model names to families using `config/model_metadata.csv`
+- Preserves original model names even if not in family enum
+- Handles multiple evaluation metrics per instance
+- Creates proper nested object structure
 
-## HELM Pipeline Details
+#### `save_individual_evaluations()`
+Saves each evaluation as separate JSON file:
+- Creates nested folder structure by source/benchmark/subject
+- Uses unique filename: `{source}_{benchmark}_{subject}_{eval_id}_{instance_id}.json`
+- Automatic deduplication via file existence checks
 
-### Step 1: Data Discovery (`src/core/web_scraper.py`)
-Scrapes the HELM website to build a comprehensive table of all available (model, dataset) evaluation runs.
+#### `process_chunk_with_individual_files()`
+Parallel processing ready:
+- ThreadPoolExecutor support for concurrent processing
+- Chunk-based processing for memory efficiency
+- Error handling and logging per file
 
-**What it does:**
-- Navigates to HELM's web interface
-- Extracts all model-dataset combinations
-- Creates CSV files listing available evaluations
-- Handles pagination and dynamic content
+### Model Name Handling
+```python
+# Model family mapping with fallback
+model_family = model_mappings.get(model_name, "other")
 
-**Output:** `data/benchmark_lines/helm_{benchmark}.csv`
-
-### Step 2: Data Download (`src/core/downloader.py`) 
-Downloads 8 different JSON files for each evaluation run from HELM's Google Cloud Storage.
-
-**JSON Files Downloaded:**
-- `run_spec.json`: Run configuration and metadata
-- `instances.json`: Input instances and ground truth
-- `predictions.json`: Model predictions
-- `eval_cache.json`: Cached evaluation results
-- `stats.json`: Statistical summaries
-- `scenario.json`: Dataset and task information
-- `per_instance_stats.json`: Instance-level statistics
-- `scenario_state.json`: Processing state information
-
-**Storage:** `data/downloads/{task_name}/`
-
-### Step 3: Data Conversion (`src/core/converter.py`)
-Transforms the raw HELM data into a standardized evaluation schema.
-
-**Schema Fields:**
-```
-evaluation_id          # Unique identifier for each evaluation
-dataset_name           # Name of the dataset being evaluated  
-hf_split              # HuggingFace split (train/test/validation)
-hf_index              # Index within the HuggingFace split
-raw_input             # Raw input text or prompt
-ground_truth          # Expected/correct answer
-model_name            # Name of the model being evaluated
-model_family          # Family/type of the model
-output                # Model's actual output
-evaluation_method_name # Method used for evaluation
-evaluation_score      # Numerical score assigned
-run                   # Evaluation run identifier
-task                  # Specific task within the evaluation
-adapter_method        # Method used for model adaptation
-source                # Always 'helm' for this data source
-source_version        # Version of HELM data
-source_url            # URL to original HELM data
-ingestion_timestamp   # When data was processed
-license               # License information
-category              # Evaluation category
+# Original name always preserved
+model_info = ModelInfo(
+    model_name=model_name,  # Always the original name
+    model_family=model_family  # Mapped or "other"
+)
 ```
 
-## HELM-Specific Configuration
+## 🧪 Testing
 
-### Download Settings
-- **Base URL**: HELM uses Google Cloud Storage for data hosting
-- **Retry Logic**: Built-in retries for network failures
-- **Parallel Downloads**: Configurable worker threads
-- **Rate Limiting**: Respects HELM's rate limits
+### Test Individual Processing
+```bash
+# Process synthetic test data
+python scripts/simple_helm_processor_evalhub.py --test-run
 
-### Data Mapping
-HELM data requires specific field mappings:
-- Model names are extracted from run specifications
-- Dataset names come from scenario configurations
-- Evaluation scores are normalized across different metric types
-- Input/output pairs are extracted from instances and predictions
+# Test with specific benchmarks
+python scripts/simple_helm_processor_evalhub.py --test-run \
+  --test-benchmarks mmlu hellaswag boolq \
+  --num-files-test 5
+```
+
+### Validate Output
+```bash
+# Check created files
+ls data/evaluations/helm/
+
+# Examine structure
+cat data/evaluations/helm/test/default/HELM_test_*.json | jq .
+```
+
+### Run Test Suite
+```bash
+# Individual tests
+python tests/test_evalhub_creation.py
+python tests/test_individual_files.py
+python tests/test_nested_structure_demo.py
+
+# All tests
+python tests/run_all_tests.py
+```
+
+## 🔄 GitHub Actions Integration
+
+The HELM processor runs automatically via GitHub Actions:
+
+### Workflow Features
+- **Weekly Schedule**: Runs every Monday at 3 AM UTC
+- **Schema Setup**: Automatically downloads EvalHub schema
+- **Individual Files**: Creates separate JSON per evaluation
+- **HuggingFace Upload**: Aggregates files for dataset hosting
+- **Error Handling**: Comprehensive logging and artifact upload
+
+### Workflow Configuration
+```yaml
+- name: Setup EvalHub Schema
+  run: |
+    chmod +x setup_schemas.sh
+    ./setup_schemas.sh
+
+- name: Run HELM Processing
+  run: |
+    python scripts/simple_helm_processor_evalhub.py \
+      --repo-id "${HF_REPO_ID}" \
+      --chunk-size 25 \
+      --max-workers 2 \
+      --source-name helm
+```
+
+## 📈 Data Flow
+
+1. **Schema Setup**: Download EvalHub schema from GitHub
+2. **Model Mapping**: Load model family mappings from config
+3. **Data Discovery**: Find HELM evaluation files (future: web scraping)
+4. **Individual Processing**: Create separate JSON file per evaluation
+5. **Deduplication**: Skip existing files automatically
+6. **Aggregation**: Combine individual files for HuggingFace upload
+7. **Upload**: Push to evaleval/every_eval_ever dataset
+
+## 🛠️ Configuration Files
+
+### `config/model_metadata.csv`
+Maps HELM model names to standardized families:
+```csv
+model_name,model_family
+gpt-4,openai
+claude-2,anthropic
+llama-2-70b,meta
+```
+
+### `setup_schemas.sh`
+Downloads and sets up EvalHub schema:
+```bash
+#!/bin/bash
+git clone https://github.com/evaleval/evalHub.git external_schemas/evalHub
+```
+
+## 🔍 Troubleshooting
+
+### Common Issues
+
+#### Schema Import Error
+```
+⚠️ EvalHub schema not available: No module named 'eval_types'
+```
+**Solution**: Run `./setup_schemas.sh` to download schema
+
+#### Missing HF Token
+```
+❌ HF_TOKEN environment variable required
+```
+**Solution**: Set `export HF_TOKEN="your_token"` or use `--test-run` for local testing
+
+#### File Processing Errors
+```
+❌ Error processing file: [Errno 2] No such file or directory
+```
+**Solution**: Check file paths and ensure data exists in expected locations
+
+### Debug Mode
+```bash
+# Enable detailed logging
+PYTHONUNBUFFERED=1 python scripts/simple_helm_processor_evalhub.py --test-run
+```
+
+## 📚 Additional Resources
+
+- **EvalHub Schema**: https://github.com/evaleval/evalHub
+- **HELM Project**: https://crfm.stanford.edu/helm/
+- **HuggingFace Dataset**: https://huggingface.co/datasets/evaleval/every_eval_ever
+- **Test Examples**: `tests/test_evalhub_creation.py`
+
+---
+
+For general repository information, see the main [README.md](../README.md).
 
 ### Common Issues and Solutions
 

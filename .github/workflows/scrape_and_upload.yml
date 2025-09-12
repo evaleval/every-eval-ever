@@ -19,6 +19,12 @@ jobs:
       - name: Setup environment (python, deps, caching)
         uses: ./.github/actions/setup-environment
 
+      - name: Setup EvalHub Schema
+        run: |
+          echo "📋 Setting up EvalHub schema..."
+          chmod +x setup_schemas.sh
+          ./setup_schemas.sh
+
       - name: Run scraping and processing
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -39,26 +45,28 @@ jobs:
           echo "⚡ Processing with simplified global deduplication"
           
           echo ""
-          echo "🚀 SIMPLIFIED PROCESSING MODE"
-          echo "📦 Small chunks for GitHub Actions disk limits"
+          echo "🚀 SIMPLIFIED PROCESSING MODE - EvalHub Schema"
+          echo "📦 Individual JSON files per evaluation"
+          echo "📁 Nested folder structure: source/benchmark/subject"
           echo "⚡ 2 parallel workers, 25 tasks/chunk"
-          echo "🎯 Target: Clean architecture with unique chunk numbers"
+          echo "🎯 Target: EvalHub-compliant individual evaluation files"
           
-          echo "🔄 Starting global processing across all benchmarks"
+          echo "🔄 Starting EvalHub processing across all benchmarks"
           
-          echo "⏳ Processing will handle all benchmarks globally..."
+          echo "⏳ Processing will create individual JSON files..."
           
-          if python scripts/simple_helm_processor.py \
+          if python scripts/simple_helm_processor_evalhub.py \
             --repo-id "${HF_REPO_ID}" \
             --chunk-size 25 \
             --max-workers 2 \
             --source-name helm; then
             echo ""
             echo "✅ STEP 1 COMPLETED SUCCESSFULLY!"
-            echo "🎉 All benchmarks processed successfully with global deduplication!"
+            echo "🎉 All benchmarks processed with EvalHub schema!"
+            echo "📁 Individual JSON files created in nested structure"
             echo "📅 Step 1 completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           else
-            echo "❌ Processing failed"
+            echo "❌ EvalHub processing failed"
             echo "📊 Check logs above for specific error details"
             exit 1
           fi
