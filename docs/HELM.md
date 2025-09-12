@@ -5,15 +5,20 @@
 ## 🚀 Quick Start
 
 ```bash
-# Test processing
+# Test processing (works immediately)
 python scripts/simple_helm_processor_evalhub.py --test-run
 
-# Full processing 
+# Full processing (requires HELM data collection first)
 python scripts/simple_helm_processor_evalhub.py --repo-id evaleval/every_eval_ever
 
 # GitHub Actions (automated weekly)
 # See .github/workflows/scrape_and_upload.yml
 ```
+
+### ⚠️ Current Status
+- ✅ **Test Mode**: Fully implemented and working
+- ⚠️ **Production Mode**: Basic implementation (needs HELM data integration)
+- 🔧 **Data Collection**: Requires HELM scraping/download implementation
 
 ## 📊 HELM Output Format
 
@@ -151,6 +156,12 @@ The HELM processor runs automatically via GitHub Actions:
 - **HuggingFace Upload**: Aggregates files for dataset hosting
 - **Error Handling**: Comprehensive logging and artifact upload
 
+### ⚠️ Current Workflow Status
+The workflow currently runs but requires HELM data collection implementation:
+- ✅ Schema setup works correctly
+- ⚠️ Production processing detects missing HELM data
+- 🔧 Needs integration with HELM data collection pipeline
+
 ### Workflow Configuration
 ```yaml
 - name: Setup EvalHub Schema
@@ -169,13 +180,32 @@ The HELM processor runs automatically via GitHub Actions:
 
 ## 📈 Data Flow
 
-1. **Schema Setup**: Download EvalHub schema from GitHub
-2. **Model Mapping**: Load model family mappings from config
-3. **Data Discovery**: Find HELM evaluation files (future: web scraping)
-4. **Individual Processing**: Create separate JSON file per evaluation
-5. **Deduplication**: Skip existing files automatically
-6. **Aggregation**: Combine individual files for HuggingFace upload
-7. **Upload**: Push to evaleval/every_eval_ever dataset
+### Current Implementation
+1. **Schema Setup**: ✅ Download EvalHub schema from GitHub
+2. **Model Mapping**: ✅ Load model family mappings from config
+3. **Data Discovery**: ⚠️ Looks for HELM files in `data/downloads/` (manual setup required)
+4. **Individual Processing**: ✅ Create separate JSON file per evaluation
+5. **Deduplication**: ✅ Skip existing files automatically
+6. **Aggregation**: ✅ Combine individual files for HuggingFace upload
+7. **Upload**: ✅ Push to evaleval/every_eval_ever dataset
+
+### Missing Components (TODO)
+- **HELM Data Collection**: Web scraping or API integration to populate `data/downloads/`
+- **Data Parsing**: Convert HELM JSON files to EvalHub format
+- **Benchmark Discovery**: Automatic detection of available HELM benchmarks
+
+### Expected Directory Structure
+```
+data/downloads/
+├── {task_name_1}/
+│   ├── instances.json      # Input data
+│   ├── predictions.json    # Model outputs  
+│   ├── run_spec.json      # Task configuration
+│   ├── eval_cache.json    # Evaluation results
+│   └── stats.json         # Statistical summaries
+├── {task_name_2}/
+│   └── ...
+```
 
 ## 🛠️ Configuration Files
 
@@ -223,6 +253,9 @@ git clone https://github.com/evaleval/evalHub.git external_schemas/evalHub
 PYTHONUNBUFFERED=1 python scripts/simple_helm_processor_evalhub.py --test-run
 ```
 
+### Note on Warnings
+The processor automatically suppresses Pydantic warnings about protected namespaces (related to `model_info` fields) as these are expected with the EvalHub schema structure.
+
 ## 📚 Additional Resources
 
 - **EvalHub Schema**: https://github.com/evaleval/evalHub
@@ -233,127 +266,3 @@ PYTHONUNBUFFERED=1 python scripts/simple_helm_processor_evalhub.py --test-run
 ---
 
 For general repository information, see the main [README.md](../README.md).
-
-### Common Issues and Solutions
-
-#### 1. Rate Limiting
-If you encounter rate limiting:
-```bash
-python main.py helm --benchmark lite --max-workers 1
-```
-
-#### 2. Network Timeouts
-For unreliable connections:
-```bash
-python main.py helm --benchmark lite --keep-temp
-```
-
-#### 3. Partial Downloads
-To resume interrupted downloads:
-```bash
-python main.py helm --benchmark lite --overwrite
-```
-
-## Advanced Usage
-
-### Custom Benchmark Processing
-```bash
-# Process specific models only
-python main.py helm --benchmark mmlu --filter-models "gpt-3.5,gpt-4"
-
-# Process specific datasets only  
-python main.py helm --benchmark classic --filter-datasets "hellaswag,winogrande"
-
-# Increase parallelism
-python main.py helm --benchmark lite --max-workers 8
-```
-
-### Data Validation
-```bash
-# Validate processed data
-python -m src.utils.evaluation_utils validate --benchmark lite
-
-# Check for missing evaluations
-python -m src.utils.dataset_utils check_completeness --benchmark mmlu
-```
-
-## File Organization
-
-HELM data is organized as follows:
-
-```
-data/
-├── benchmark_lines/           # Scraped evaluation catalogs
-│   ├── helm_lite.csv         # Lite benchmark tasks
-│   ├── helm_mmlu.csv         # MMLU benchmark tasks  
-│   └── helm_classic.csv      # Classic benchmark tasks
-├── downloads/                 # Raw HELM JSON files
-│   └── {task_name}/          # One folder per evaluation task
-│       ├── run_spec.json     # Task configuration
-│       ├── instances.json    # Input data
-│       ├── predictions.json  # Model outputs
-│       ├── eval_cache.json   # Evaluation cache
-│       ├── stats.json        # Statistical summaries
-│       ├── scenario.json     # Dataset metadata
-│       ├── per_instance_stats.json  # Instance-level metrics
-│       └── scenario_state.json      # Processing state
-└── processed/                 # Converted CSV files
-    └── {benchmark}/          # One folder per benchmark
-        └── {task_files}.csv  # Standardized evaluation data
-```
-
-## Integration with HuggingFace Datasets
-
-The processed HELM data is automatically uploaded to HuggingFace Datasets via GitHub Actions:
-
-- **Repository**: `evaleval/every_eval_ever`
-- **Update Frequency**: Weekly (Mondays at 03:00 UTC)
-- **Format**: Parquet shards optimized for streaming
-- **Naming**: `data-XXXXX.parquet` with incremental numbering
-
-Access the live dataset:
-```python
-from datasets import load_dataset
-
-# Load HELM evaluation data
-dataset = load_dataset("evaleval/every_eval_ever")
-
-# Or stream for large datasets
-dataset = load_dataset("evaleval/every_eval_ever", streaming=True)
-
-# Filter for HELM data only
-helm_data = dataset.filter(lambda x: x['source'] == 'helm')
-```
-
-## Troubleshooting
-
-### Common Error Messages
-
-**"Browser timeout while loading HELM page"**
-- HELM website may be temporarily unavailable
-- Try again later or reduce concurrent requests
-
-**"Failed to download JSON file"**
-- Network connectivity issues
-- File may have been moved or deleted from HELM storage
-- Check HELM's status page
-
-**"Invalid JSON format in downloaded file"**
-- Corrupted download or empty file
-- Delete the file and re-run with `--overwrite`
-
-**"Model name not found in run_spec.json"**
-- HELM changed their data format
-- May require updating the field mappings in converter.py
-
-### Getting Help
-
-For HELM-specific issues:
-1. Check [HELM's official documentation](https://crfm.stanford.edu/helm/)
-2. Review HELM's GitHub repository for known issues
-3. Verify that HELM's website and storage are accessible
-
-For processing issues:
-1. Enable debug logging: `--verbose`
-2. Keep temporary files: `--keep-temp`
-3. Check the logs in `helm_processor.log`
