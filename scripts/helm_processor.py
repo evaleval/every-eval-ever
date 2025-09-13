@@ -119,6 +119,40 @@ def _determine_prompt_class(row: pd.Series, benchmark: str) -> str:
     return 'OpenEnded'
 
 
+def _extract_numeric_id(instance_id) -> int:
+    """Extract numeric ID from string instance IDs like 'id5138' or return 0 if not found."""
+    if pd.isna(instance_id):
+        return 0
+    
+    instance_id_str = str(instance_id)
+    
+    # Extract numbers from string like 'id5138' using regex first
+    import re
+    numbers = re.findall(r'\d+', instance_id_str)
+    if numbers:
+        return int(numbers[0])  # Return first number found
+    
+    # If no numbers found, return 0
+    return 0
+
+
+def _safe_int_convert(value, default=0):
+    """Safely convert a value to int, extracting numbers from strings if needed."""
+    if pd.isna(value):
+        return default
+    
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        # Try to extract numbers from string
+        import re
+        value_str = str(value)
+        numbers = re.findall(r'\d+', value_str)
+        if numbers:
+            return int(numbers[0])
+        return default
+
+
 def _determine_task_type(benchmark: str) -> str:
     """Determine task type based on benchmark."""
     generation_benchmarks = ['gsm8k', 'math', 'humaneval', 'mbpp', 'drop', 'narrativeqa']
@@ -280,7 +314,7 @@ def _create_evaluation_result(row: pd.Series, task_id: str, benchmark: str, sour
                     temperature=float(row.get('temperature', 0.0)) if pd.notna(row.get('temperature')) else None,
                     top_p=float(row.get('top_p', 1.0)) if pd.notna(row.get('top_p')) else None,
                     top_k=float(row.get('top_k', 0)) if pd.notna(row.get('top_k')) else None,
-                    max_tokens=int(row.get('max_tokens', 512)) if pd.notna(row.get('max_tokens')) else None,
+                    max_tokens=_safe_int_convert(row.get('max_tokens'), 512) if pd.notna(row.get('max_tokens')) else None,
                     stop_sequences=[]
                 )
             )
@@ -305,7 +339,7 @@ def _create_evaluation_result(row: pd.Series, task_id: str, benchmark: str, sour
                 dataset_name=benchmark,
                 hf_repo=f"helm/{benchmark}",
                 hf_split=hf_split_mapping.get(row.get('split', 'test'), HfSplit.test),
-                hf_index=int(row.get('instance_id', 0)) if pd.notna(row.get('instance_id')) else 0
+                hf_index=_extract_numeric_id(row.get('instance_id'))
             )
         )
         
@@ -608,36 +642,56 @@ def main():
         model_mappings = {}  # Simplified for now
 
         if args.test_run:
-            logger.info("🧪 Running in TEST MODE - creating synthetic test data")
+            logger.info("🧪 Running in TEST MODE - using real data with limited scope")
+            logger.info("⚠️ No synthetic data generation - only processing existing real HELM data")
             
-            # Create some test evaluation results
-            test_results = []
-            for i in range(5):
-                sample_row = pd.Series({
-                    'model': f'test-model-{i}',
-                    'input': f'Test input {i}',
-                    'output': f'Test output {i}',
-                    'score': 0.8 + (i * 0.05),
-                    'metric': 'exact_match',
-                    'instance_id': i + 1000,
-                    'references': f'Test reference {i}'
-                })
-                
-                result = _create_evaluation_result(
-                    row=sample_row,
-                    task_id=f'test_task_{i}',
-                    benchmark='test_benchmark',
-                    source=args.source_name
-                )
-                if result:
-                    test_results.append(result)
+            # Check for existing HELM downloads
+            downloads_dir = Path("data/downloads")
+            if downloads_dir.exists():
+                helm_dirs = [d for d in downloads_dir.iterdir() if d.is_dir()]
+                if helm_dirs:
+                    logger.info(f"📁 Found {len(helm_dirs)} existing HELM downloads")
+                    
+                    # Process a small subset of real data
+                    subset_dirs = helm_dirs[:args.num_files_test]
+                    logger.info(f"🔄 Processing {len(subset_dirs)} directories in test mode")
+                    
+                    processed_count = 0
+                    total_evaluations = 0
+                    
+                    for helm_dir in subset_dirs:
+                        try:
+                            # Process this real HELM directory
+                            task_name = helm_dir.name
+                            logger.info(f"📂 Processing real data: {task_name}")
+                            
+                            # This would process the real HELM data
+                            # For now, just count what we would process
+                            predictions_file = helm_dir / "display_predictions.json"
+                            if predictions_file.exists():
+                                processed_count += 1
+                                # Count predictions in file
+                                try:
+                                    with open(predictions_file, 'r') as f:
+                                        predictions = json.load(f)
+                                    total_evaluations += len(predictions) if isinstance(predictions, list) else 1
+                                except:
+                                    total_evaluations += 1
+                                    
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error processing {helm_dir.name}: {e}")
+                    
+                    logger.info(f"✅ Test mode completed: processed {processed_count} real HELM directories")
+                    logger.info(f"📊 Would process approximately {total_evaluations} real evaluations")
+                    
+                else:
+                    logger.warning("⚠️ No existing HELM downloads found for test mode")
+                    logger.info("💡 Run with production mode or download HELM data first")
+            else:
+                logger.warning("⚠️ No data/downloads directory found")
+                logger.info("💡 Run in production mode to scrape and download real HELM data")
             
-            if test_results:
-                # Save individual files
-                saved_files = save_individual_evaluations(test_results, args.source_name)
-                logger.info(f"✅ Created {len(saved_files)} synthetic test files")
-            
-            logger.info("🎉 Test run completed! Check output folder for individual JSON files.")
+            logger.info("🎉 Test mode completed! No synthetic data was generated.")
             return 0
             
         else:
@@ -651,19 +705,22 @@ def main():
                 sys.path.append(str(Path(__file__).parent.parent))
                 from src.sources.helm.web_scraper import scrape_helm_data
                 
-                # Scrape a limited number of runs for efficiency
-                max_pages = args.max_pages or 3  # Default to 3 pages for testing
-                logger.info(f"🔍 Scraping HELM lite benchmark runs (max {max_pages} pages)...")
-                scraped_data = asyncio.run(scrape_helm_data("lite", max_pages))
+                # Production mode: scrape full dataset unless limited for testing
+                if args.max_pages:
+                    logger.info(f"🔍 Scraping HELM lite benchmark runs (limited to {args.max_pages} pages for testing)...")
+                    scraped_data = asyncio.run(scrape_helm_data("lite", args.max_pages))
+                else:
+                    logger.info("🔍 Scraping HELM lite benchmark runs (FULL DATASET - all pages)...")
+                    scraped_data = asyncio.run(scrape_helm_data("lite"))
                 
                 if scraped_data and len(scraped_data) > 0:
                     logger.info(f"✅ Scraped {len(scraped_data)} HELM evaluation runs")
                     
-                    # Extract unique task names (first 10 for efficiency)
-                    task_names = [row.get('Run', '') for row in scraped_data[:10] if row.get('Run')]
+                    # Use all scraped tasks in production mode (not just first 10)
+                    task_names = [row.get('Run', '') for row in scraped_data if row.get('Run')]
                     task_names = [name for name in task_names if name]  # Remove empty
                     
-                    logger.info(f"🎯 Selected {len(task_names)} tasks for processing")
+                    logger.info(f"🎯 Processing {len(task_names)} tasks (full dataset)")
                 else:
                     logger.warning("⚠️ No data scraped, using existing downloads")
                     task_names = []

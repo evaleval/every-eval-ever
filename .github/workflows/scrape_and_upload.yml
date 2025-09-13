@@ -48,8 +48,9 @@ jobs:
           echo "🚀 SIMPLIFIED PROCESSING MODE - EvalHub Schema"
           echo "📦 Individual JSON files per evaluation"
           echo "📁 Nested folder structure: source/benchmark/subject"
-          echo "⚡ 2 parallel workers, 25 tasks/chunk"
+          echo "⚡ 4 parallel workers, 50 tasks/chunk (production optimized)"
           echo "🎯 Target: EvalHub-compliant individual evaluation files"
+          echo "🌍 Full HELM dataset (all pages)"
           
           echo "🔄 Starting EvalHub processing across all benchmarks"
           
@@ -57,8 +58,8 @@ jobs:
           
           if python scripts/helm_processor.py \
             --repo-id "${HF_REPO_ID}" \
-            --chunk-size 25 \
-            --max-workers 2 \
+            --chunk-size 50 \
+            --max-workers 4 \
             --source-name helm; then
             echo ""
             echo "✅ STEP 1 COMPLETED SUCCESSFULLY!"

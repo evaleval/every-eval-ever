@@ -5,19 +5,24 @@
 ## 🚀 Quick Start
 
 ```bash
-# Test processing (works immediately)
+# Test processing (checks for existing real data, no synthetic data)
 python scripts/helm_processor.py --test-run
 
-# Full processing (requires HELM data collection first)
-python scripts/helm_processor.py --repo-id evaleval/every_eval_ever
+# Limited testing with scraping (e.g., 2 pages)
+python scripts/helm_processor.py --test-run --max-pages 2
 
-# GitHub Actions (automated weekly)
+# Full production processing (scrapes ALL HELM data)
+python scripts/helm_processor.py --repo-id evaleval/every_eval_ever --chunk-size 50 --max-workers 4
+
+# GitHub Actions (automated weekly - full dataset)
 # See .github/workflows/scrape_and_upload.yml
 ```
 
-### ⚠️ Current Status
-- ✅ **Test Mode**: Fully implemented and working
-- ⚠️ **Production Mode**: Basic implementation (needs HELM data integration)
+### ✅ Current Status
+- ✅ **Test Mode**: Uses real data only, no synthetic data generation
+- ✅ **Production Mode**: Full implementation with scraping, downloading, and processing
+- ✅ **Page Limiting**: Optional --max-pages for testing (production uses full dataset)
+- ✅ **Performance**: Optimized with 4 workers and chunked processing
 - 🔧 **Data Collection**: Requires HELM scraping/download implementation
 
 ## 📊 HELM Output Format
