@@ -29,6 +29,7 @@ import logging
 import pandas as pd
 from huggingface_hub import HfApi
 from datasets import Dataset
+from datasets import Dataset
 
 # Suppress Pydantic protected namespace warnings
 warnings.filterwarnings("ignore", message=".*protected namespace.*", category=UserWarning)
@@ -96,6 +97,101 @@ def _extract_model_family(model_name: str) -> str:
             return family
     
     return 'unknown'
+
+
+def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
+    """Process a single HELM directory and return evaluation results."""
+    evaluation_results = []
+    
+    try:
+        # Check if this directory has the expected HELM files
+        expected_files = ["instances.json", "display_predictions.json", "run_spec.json"]
+        missing_files = [f for f in expected_files if not (helm_dir / f).exists()]
+        
+        if missing_files:
+            logger.warning(f"⚠️ Skipping {helm_dir.name}: missing files {missing_files}")
+            return []
+        
+        # Load the HELM JSON files
+        instances_file = helm_dir / "instances.json"
+        predictions_file = helm_dir / "display_predictions.json"
+        run_spec_file = helm_dir / "run_spec.json"
+        
+        # Load and verify the data
+        with open(instances_file, 'r') as f:
+            instances = json.load(f)
+        with open(predictions_file, 'r') as f:
+            predictions = json.load(f)
+        with open(run_spec_file, 'r') as f:
+            run_spec = json.load(f)
+        
+        logger.info(f"📄 Loaded HELM files for {helm_dir.name}")
+        logger.info(f"   📊 Instances: {len(instances) if isinstance(instances, list) else 'N/A'}")
+        logger.info(f"   🎯 Predictions: {len(predictions) if isinstance(predictions, list) else 'N/A'}")
+        
+        # Determine benchmark from run_spec or directory name
+        benchmark = "unknown"
+        try:
+            if run_spec and isinstance(run_spec, dict):
+                scenario_spec = run_spec.get("scenario_spec", {})
+                if scenario_spec and isinstance(scenario_spec, dict):
+                    benchmark = scenario_spec.get("class_name", "unknown")
+            
+            if benchmark == "unknown":
+                # Extract from directory name
+                task_name = helm_dir.name
+                for known_benchmark in ["mmlu", "hellaswag", "boolq", "commonsense", "babi_qa"]:
+                    if known_benchmark in task_name.lower():
+                        benchmark = known_benchmark
+                        break
+        except Exception as e:
+            logger.warning(f"⚠️ Could not determine benchmark: {e}")
+        
+        # Process predictions into EvaluationResult format
+        if isinstance(predictions, list):
+            for i, prediction in enumerate(predictions):
+                try:
+                    instance_id = _extract_numeric_id(prediction.get("instance", {}).get("instance_id", i))
+                    
+                    # Create a row with the prediction data
+                    row = pd.Series({
+                        'instance_id': instance_id,
+                        'predicted_text': prediction.get("predicted_text", ""),
+                        'prediction_score': prediction.get("prediction_score", 0.0),
+                        'correct': prediction.get("correct", False),
+                        'request_state': prediction.get("request_state", {}),
+                        'stats': prediction.get("stats", {}),
+                        'instance': prediction.get("instance", {})
+                    })
+                    
+                    # Create EvaluationResult using the existing function
+                    result = _create_evaluation_result(
+                        row=row,
+                        task_id=f'{helm_dir.name}_{instance_id}',
+                        benchmark=benchmark,
+                        source=source_name
+                    )
+                    
+                    if result:
+                        evaluation_results.append(result)
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not process instance {i}: {e}")
+                    continue
+        
+        logger.info(f"🎯 Created {len(evaluation_results)} EvaluationResult objects")
+        
+        # Calculate accuracy for this directory
+        if evaluation_results:
+            correct_count = sum(1 for result in evaluation_results 
+                              if 'evaluation' in result and result['evaluation'].get('score', 0) == 1.0)
+            accuracy = correct_count / len(evaluation_results) if evaluation_results else 0
+            logger.info(f"📈 Accuracy: {correct_count}/{len(evaluation_results)} ({accuracy:.2%})")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing HELM directory {helm_dir.name}: {e}")
+    
+    return evaluation_results
 
 
 def _determine_prompt_class(row: pd.Series, benchmark: str) -> str:
@@ -623,6 +719,11 @@ def main():
     parser.add_argument('--test-benchmarks', type=str, nargs='+', 
                         default=['mmlu', 'hellaswag', 'boolq'],
                         help='Benchmarks to test with (default: mmlu, hellaswag, boolq)')
+    parser.add_argument('--helm-benchmarks', type=str, nargs='+',
+                        default=['lite', 'classic', 'mmlu'],
+                        help='HELM benchmarks to scrape (default: lite, classic, mmlu)')
+    parser.add_argument('--local-only', action='store_true',
+                        help='Local processing only - skip HuggingFace upload but still do streaming')
     
     args = parser.parse_args()
     
@@ -633,8 +734,8 @@ def main():
     
     # Get HF token
     hf_token = os.getenv('HF_TOKEN')
-    if not hf_token and not args.test_run:
-        logger.error("❌ HF_TOKEN environment variable required (or use --test-run for local testing)")
+    if not hf_token and not args.test_run and not args.local_only:
+        logger.error("❌ HF_TOKEN environment variable required (or use --test-run or --local-only for local testing)")
         return 1
     
     try:
@@ -695,257 +796,327 @@ def main():
             return 0
             
         else:
-            # Production mode - complete HELM pipeline: scrape -> download -> process
-            logger.info("🚀 Production mode: Complete HELM evaluation pipeline")
+            # Production mode - streaming pipeline: scrape -> download in chunks -> process -> upload -> clean
+            logger.info("🚀 Production mode: Streaming HELM evaluation pipeline")
             
             # Step 1: Scrape HELM runs from website
-            logger.info("📋 Step 1: Scraping HELM evaluation runs...")
+            logger.info("📋 Step 1: Scraping HELM evaluation runs from multiple benchmarks...")
             try:
                 # Import scraping functionality
                 sys.path.append(str(Path(__file__).parent.parent))
                 from src.sources.helm.web_scraper import scrape_helm_data
                 
-                # Production mode: scrape full dataset unless limited for testing
-                if args.max_pages:
-                    logger.info(f"🔍 Scraping HELM lite benchmark runs (limited to {args.max_pages} pages for testing)...")
-                    scraped_data = asyncio.run(scrape_helm_data("lite", args.max_pages))
-                else:
-                    logger.info("🔍 Scraping HELM lite benchmark runs (FULL DATASET - all pages)...")
-                    scraped_data = asyncio.run(scrape_helm_data("lite"))
+                # Define HELM benchmarks to scrape from command line argument
+                helm_benchmarks = args.helm_benchmarks
+                logger.info(f"🎯 Target benchmarks: {', '.join(helm_benchmarks)}")
                 
-                if scraped_data and len(scraped_data) > 0:
-                    logger.info(f"✅ Scraped {len(scraped_data)} HELM evaluation runs")
-                    
-                    # Use all scraped tasks in production mode (not just first 10)
-                    task_names = [row.get('Run', '') for row in scraped_data if row.get('Run')]
-                    task_names = [name for name in task_names if name]  # Remove empty
-                    
-                    logger.info(f"🎯 Processing {len(task_names)} tasks (full dataset)")
-                else:
-                    logger.warning("⚠️ No data scraped, using existing downloads")
-                    task_names = []
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Scraping failed, using existing downloads: {e}")
-                task_names = []
-            
-            # Step 2: Download HELM data
-            if task_names:
-                logger.info("� Step 2: Downloading HELM evaluation data...")
-                try:
-                    from src.sources.helm.downloader import download_tasks
-                    
-                    successful_downloads = download_tasks(
-                        tasks=task_names,
-                        output_dir="data/downloads",
-                        benchmark="lite",
-                        overwrite=False,  # Don't overwrite existing
-                        show_progress=True
-                    )
-                    
-                    logger.info(f"✅ Downloaded {len(successful_downloads)} evaluation datasets")
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Download failed, using existing data: {e}")
-            
-            # Step 3: Process HELM data files
-            logger.info("🔄 Step 3: Processing HELM data files to EvalHub format...")
-            
-            # Find HELM data files to process
-            data_path = Path("data/downloads")
-            if not data_path.exists():
-                logger.error("❌ HELM data directory not found: data/downloads")
-                logger.info("💡 Expected directory structure: data/downloads/{task_name}/")
-                return 1
-            
-            # Find all HELM evaluation directories
-            helm_dirs = [d for d in data_path.iterdir() if d.is_dir()]
-            if not helm_dirs:
-                logger.warning("⚠️ No HELM evaluation directories found in data/downloads")
-                logger.info("💡 Run HELM data collection first to populate data/downloads")
-                return 1
-            
-            logger.info(f"📁 Found {len(helm_dirs)} HELM evaluation directories")
-            
-            # Process each directory with our proven working logic
-            processed_count = 0
-            error_count = 0
-            total_evaluations = 0
-            
-            for helm_dir in helm_dirs:
-                try:
-                    logger.info(f"🔄 Processing: {helm_dir.name}")
-                    
-                    # Check if this directory has the expected HELM files
-                    expected_files = ["instances.json", "display_predictions.json", "run_spec.json"]
-                    missing_files = [f for f in expected_files if not (helm_dir / f).exists()]
-                    
-                    if missing_files:
-                        logger.warning(f"⚠️ Skipping {helm_dir.name}: missing files {missing_files}")
-                        continue
-                    
-                    # Process this HELM evaluation directory with real data
+                all_scraped_data = []
+                
+                # Scrape from each benchmark
+                for benchmark in helm_benchmarks:
+                    logger.info(f"🔍 Scraping {benchmark} benchmark...")
                     try:
-                        # Load the HELM JSON files
-                        instances_file = helm_dir / "instances.json"
-                        predictions_file = helm_dir / "display_predictions.json"
-                        run_spec_file = helm_dir / "run_spec.json"
-                        
-                        # Load and verify the data
-                        with open(instances_file, 'r') as f:
-                            instances = json.load(f)
-                        with open(predictions_file, 'r') as f:
-                            predictions = json.load(f)
-                        with open(run_spec_file, 'r') as f:
-                            run_spec = json.load(f)
-                        
-                        logger.info(f"📊 Found {len(instances)} instances and {len(predictions)} predictions")
-                        
-                        # Create instance ID to prediction mapping
-                        pred_map = {pred.get('instance_id'): pred for pred in predictions}
-                        
-                        # Create EvaluationResult objects from the real HELM data
-                        evaluation_results = []
-                        for i, instance in enumerate(instances):
-                            try:
-                                instance_id = instance.get('id')
-                                prediction = pred_map.get(instance_id)
-                                
-                                if not prediction:
-                                    continue
-                                    
-                                # Extract input question
-                                input_text = instance.get('input', {}).get('text', 'No input text')
-                                
-                                # Extract reference answer
-                                references = instance.get('references', [])
-                                correct_answer = None
-                                if references:
-                                    correct_answer = next((ref['output']['text'] for ref in references if 'correct' in ref.get('tags', [])), None)
-                                
-                                # Extract model prediction
-                                model_output = prediction.get('mapped_output') or prediction.get('predicted_text', 'No prediction')
-                                
-                                # Calculate score
-                                score = 1.0 if model_output == correct_answer else 0.0
-                                
-                                # Extract model name from run_spec
-                                model_name = run_spec.get('model', 'unknown_model')
-                                
-                                # Create sample data for _create_evaluation_result
-                                sample_data = {
-                                    'model': model_name,
-                                    'input': input_text,
-                                    'output': model_output,
-                                    'score': score,
-                                    'metric': 'exact_match',
-                                    'instance_id': instance_id,
-                                    'references': correct_answer or 'No reference'
-                                }
-                                
-                                row = pd.Series(sample_data)
-                                benchmark = helm_dir.name.split(':')[0] if ':' in helm_dir.name else helm_dir.name
-                                
-                                result = _create_evaluation_result(
-                                    row=row,
-                                    task_id=f'{helm_dir.name}_{instance_id}',
-                                    benchmark=benchmark,
-                                    source=args.source_name
-                                )
-                                
-                                if result:
-                                    evaluation_results.append(result)
-                                    
-                            except Exception as e:
-                                logger.warning(f"⚠️ Could not process instance {i}: {e}")
-                                continue
-                        
-                        logger.info(f"🎯 Created {len(evaluation_results)} EvaluationResult objects")
-                        
-                        # Calculate accuracy for this directory
-                        if evaluation_results:
-                            correct_count = sum(1 for result in evaluation_results 
-                                              if 'evaluation' in result and result['evaluation'].get('score', 0) == 1.0)
-                            accuracy = correct_count / len(evaluation_results) if evaluation_results else 0
-                            logger.info(f"📈 Accuracy: {correct_count}/{len(evaluation_results)} ({accuracy:.2%})")
-                        
-                        # Save individual JSON files
-                        if evaluation_results:
-                            saved_count = save_individual_evaluations(evaluation_results, args.source_name)
-                            logger.info(f"💾 Saved {saved_count} individual JSON files")
-                            processed_count += 1
-                            total_evaluations += len(evaluation_results)
+                        if args.max_pages:
+                            logger.info(f"   📄 Limited to {args.max_pages} pages for testing")
+                            benchmark_data = asyncio.run(scrape_helm_data(benchmark, args.max_pages))
                         else:
-                            logger.warning(f"⚠️ No valid EvaluationResult objects created")
+                            logger.info(f"   🌍 Full dataset (all pages)")
+                            benchmark_data = asyncio.run(scrape_helm_data(benchmark))
+                        
+                        if benchmark_data:
+                            logger.info(f"   ✅ Scraped {len(benchmark_data)} runs from {benchmark}")
+                            # Add benchmark info to each run
+                            for run in benchmark_data:
+                                run['_source_benchmark'] = benchmark
+                            all_scraped_data.extend(benchmark_data)
+                        else:
+                            logger.warning(f"   ⚠️ No data scraped from {benchmark}")
                             
                     except Exception as e:
-                        logger.error(f"❌ Error processing HELM data: {e}")
-                        error_count += 1
+                        logger.warning(f"   ❌ Failed to scrape {benchmark}: {e}")
+                        continue
+                
+                if all_scraped_data:
+                    logger.info(f"✅ Total scraped: {len(all_scraped_data)} runs across all benchmarks")
                     
-                except Exception as e:
-                    logger.error(f"❌ Error processing {helm_dir.name}: {e}")
-                    error_count += 1
+                    # Use all scraped tasks from all benchmarks
+                    task_names = []
+                    benchmark_map = {}  # Map task name to benchmark
+                    
+                    for run in all_scraped_data:
+                        task_name = run.get('Run', '')
+                        if task_name:
+                            task_names.append(task_name)
+                            benchmark_map[task_name] = run.get('_source_benchmark', 'lite')
+                    
+                    task_names = [name for name in task_names if name]  # Remove empty
+                    logger.info(f"📝 Prepared {len(task_names)} tasks for streaming processing")
+                else:
+                    logger.warning("⚠️ No HELM runs scraped - using existing data if available")
+                    task_names = []
+                    benchmark_map = {}
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Scraping failed, using existing data: {e}")
+                task_names = []
+                benchmark_map = {}
             
-            logger.info(f"✅ Production processing completed:")
-            logger.info(f"   📊 Processed: {processed_count} directories")
-            logger.info(f"   🔢 Total evaluations: {total_evaluations}")
-            logger.info(f"   ❌ Errors: {error_count}")
-            
-            if processed_count == 0:
-                logger.warning("⚠️ No evaluations were successfully processed")
-                logger.info("💡 This indicates HELM data collection or processing logic needs implementation")
-                return 1
-            
-            # Step 4: Aggregate and upload to HuggingFace
-            if total_evaluations > 0:
-                logger.info("📦 Step 4: Aggregating and uploading to HuggingFace...")
-                try:
-                    # Find all individual JSON files that were created
-                    eval_dir = Path("data/evaluations")
-                    if eval_dir.exists():
-                        individual_files = list(eval_dir.rglob("*.json"))
+            # Step 2-5: Individual task streaming pipeline with parallel processing
+            if task_names:
+                logger.info("🌊 Starting individual task streaming pipeline: download -> process -> upload -> clean")
+                
+                # Setup HuggingFace API for uploads
+                api = None
+                if not args.test_run and not args.local_only:
+                    api = setup_hf_api(os.environ.get('HF_TOKEN'), args.repo_id)
+                
+                # Import threading for parallel processing
+                import threading
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from queue import Queue
+                
+                # Thread-safe counters
+                total_processed = 0
+                total_uploaded = 0
+                processing_lock = threading.Lock()
+                
+                def process_single_task(task_info):
+                    """Process a single task: download -> process -> upload -> clean"""
+                    task_name, benchmark, task_index = task_info
+                    nonlocal total_processed, total_uploaded
+                    
+                    thread_id = threading.current_thread().name[-1]  # Get thread number
+                    logger.info(f"� Thread-{thread_id}: Processing task {task_index}/{len(task_names)}: {task_name[:50]}...")
+                    
+                    try:
+                        # Step 1: Download this single task
+                        logger.info(f"📥 Thread-{thread_id}: Downloading from {benchmark}...")
+                        from src.sources.helm.downloader import download_tasks
                         
-                        if individual_files:
-                            logger.info(f"📁 Found {len(individual_files)} individual evaluation files")
-                            
-                            # Aggregate files to HuggingFace dataset format
-                            aggregated_file = aggregate_individual_files_to_hf_dataset(
-                                [str(f) for f in individual_files], 
-                                chunk_id=1
-                            )
-                            
-                            if aggregated_file and Path(aggregated_file).exists():
-                                logger.info(f"✅ Aggregated data saved to {aggregated_file}")
+                        successful_downloads = download_tasks(
+                            tasks=[task_name],
+                            output_dir="data/downloads",
+                            benchmark=benchmark,
+                            overwrite=False,
+                            show_progress=False  # Disable progress bar for cleaner parallel output
+                        )
+                        
+                        if not successful_downloads:
+                            logger.warning(f"⚠️ Thread-{thread_id}: Failed to download {task_name}")
+                            return False
+                        
+                        # Step 2: Process this task immediately
+                        logger.info(f"� Thread-{thread_id}: Processing...")
+                        data_path = Path("data/downloads")
+                        helm_dir = data_path / task_name
+                        
+                        if not helm_dir.exists():
+                            logger.warning(f"⚠️ Thread-{thread_id}: Directory not found after download")
+                            return False
+                        
+                        # Process this HELM directory
+                        evaluation_results = process_helm_directory(helm_dir, args.source_name)
+                        
+                        if not evaluation_results:
+                            logger.warning(f"⚠️ Thread-{thread_id}: No evaluation results generated")
+                            return False
+                        
+                        # Step 3: Create individual dataset file and upload immediately
+                        logger.info(f"📤 Thread-{thread_id}: Uploading {len(evaluation_results)} evaluations...")
+                        
+                        # Create dataset for this single task
+                        task_dataset = Dataset.from_list(evaluation_results)
+                        
+                        # Save locally with unique filename
+                        agg_dir = Path("data/aggregated")
+                        agg_dir.mkdir(parents=True, exist_ok=True)
+                        task_file = agg_dir / f"task_{task_index:04d}_{task_name.replace('/', '_').replace(':', '_')[:50]}_evalhub.json"
+                        task_dataset.to_json(str(task_file))
+                        
+                        upload_success = False
+                        # Upload to HuggingFace immediately
+                        if api and not args.test_run and not args.local_only:
+                            try:
+                                api.upload_file(
+                                    path_or_fileobj=str(task_file),
+                                    path_in_repo=f"data/{task_file.name}",
+                                    repo_id=args.repo_id,
+                                    repo_type="dataset"
+                                )
+                                upload_success = True
+                                logger.info(f"✅ Thread-{thread_id}: Uploaded to HuggingFace")
                                 
-                                # Setup HuggingFace API and upload
-                                if not args.test_run:
-                                    logger.info(f"🚀 Uploading to HuggingFace repository: {args.repo_id}")
-                                    api = setup_hf_api(os.environ.get('HF_TOKEN'), args.repo_id)
-                                    
-                                    # Upload the aggregated file
-                                    api.upload_file(
-                                        path_or_fileobj=aggregated_file,
-                                        path_in_repo=f"data/{Path(aggregated_file).name}",
-                                        repo_id=args.repo_id,
-                                        repo_type="dataset"
-                                    )
-                                    
-                                    logger.info("✅ Successfully uploaded to HuggingFace!")
-                                else:
-                                    logger.info("🧪 Test mode - skipping HuggingFace upload")
-                            else:
-                                logger.warning("⚠️ Failed to aggregate individual files")
+                            except Exception as e:
+                                logger.error(f"❌ Thread-{thread_id}: Upload failed: {e}")
                         else:
-                            logger.warning("⚠️ No individual evaluation files found for aggregation")
-                    else:
-                        logger.warning("⚠️ Evaluation directory not found")
+                            upload_success = True  # Consider local saves as success
+                            if args.local_only:
+                                logger.info(f"🏠 Thread-{thread_id}: Saved locally")
+                            else:
+                                logger.info(f"🧪 Thread-{thread_id}: Test mode - saved locally")
                         
-                except Exception as e:
-                    logger.error(f"❌ Error during aggregation/upload: {e}")
-                    # Don't fail the entire process for upload errors
+                        # Step 4: Clean up immediately to save memory
+                        if not args.no_cleanup:
+                            try:
+                                # Remove download directory
+                                if helm_dir.exists():
+                                    import shutil
+                                    shutil.rmtree(helm_dir)
+                                
+                                # Remove local file after upload (if uploaded successfully)
+                                if upload_success and not args.local_only and task_file.exists():
+                                    task_file.unlink()
+                                
+                                logger.info(f"🧹 Thread-{thread_id}: Cleaned up")
+                            except Exception as e:
+                                logger.warning(f"⚠️ Thread-{thread_id}: Cleanup failed: {e}")
+                        
+                        # Update counters thread-safely
+                        with processing_lock:
+                            nonlocal total_processed, total_uploaded
+                            total_processed += len(evaluation_results)
+                            if upload_success:
+                                total_uploaded += len(evaluation_results)
+                        
+                        logger.info(f"✅ Thread-{thread_id}: Completed task {task_index}")
+                        return True
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Thread-{thread_id}: Error processing {task_name}: {e}")
+                        return False
+                
+                # Prepare task list with benchmark info and index
+                task_list = []
+                for i, task_name in enumerate(task_names, 1):
+                    benchmark = benchmark_map.get(task_name, 'lite')
+                    task_list.append((task_name, benchmark, i))
+                
+                logger.info(f"🚀 Starting parallel processing with {args.max_workers} threads")
+                logger.info(f"📊 Total tasks to process: {len(task_list)}")
+                
+                # Process tasks in parallel with configurable thread count
+                with ThreadPoolExecutor(max_workers=args.max_workers, thread_name_prefix="TaskWorker") as executor:
+                    # Submit all tasks
+                    future_to_task = {executor.submit(process_single_task, task_info): task_info for task_info in task_list}
+                    
+                    completed_count = 0
+                    failed_count = 0
+                    
+                    # Process completed tasks
+                    for future in as_completed(future_to_task):
+                        task_info = future_to_task[future]
+                        task_name, benchmark, task_index = task_info
+                        
+                        try:
+                            success = future.result()
+                            if success:
+                                completed_count += 1
+                            else:
+                                failed_count += 1
+                                
+                            # Progress update
+                            total_tasks = len(task_list)
+                            progress = (completed_count + failed_count) / total_tasks * 100
+                            logger.info(f"📈 Progress: {completed_count}/{total_tasks} completed ({progress:.1f}%), {failed_count} failed")
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            logger.error(f"❌ Task {task_index} failed with exception: {e}")
+                
+                logger.info(f"🎉 Individual task streaming completed!")
+                logger.info(f"   📊 Total processed: {total_processed} evaluations")
+                logger.info(f"   📤 Total uploaded: {total_uploaded} evaluations")
+                logger.info(f"   ✅ Successful tasks: {completed_count}")
+                logger.info(f"   ❌ Failed tasks: {failed_count}")
+                return 0
             
-            logger.info("🎉 Complete HELM pipeline finished successfully!")
-            return 0
+            else:
+                # Fallback: process existing data
+                logger.info("🔄 Processing existing HELM data files...")
+                
+                # Find HELM data files to process
+                data_path = Path("data/downloads")
+                if not data_path.exists():
+                    logger.error("❌ HELM data directory not found: data/downloads")
+                    logger.info("💡 Expected directory structure: data/downloads/{task_name}/")
+                    return 1
+                
+                # Find all HELM evaluation directories
+                helm_dirs = [d for d in data_path.iterdir() if d.is_dir()]
+                if not helm_dirs:
+                    logger.warning("⚠️ No HELM evaluation directories found in data/downloads")
+                    logger.info("💡 Run HELM data collection first to populate data/downloads")
+                    return 1
+                
+                logger.info(f"📁 Found {len(helm_dirs)} HELM evaluation directories")
+                
+                # Process existing data using our new helper function
+                for helm_dir in helm_dirs:
+                    try:
+                        evaluation_results = process_helm_directory(helm_dir, args.source_name)
+                        if evaluation_results:
+                            total_evaluations += len(evaluation_results)
+                            processed_count += 1
+                            
+                            # Save individual evaluations
+                            saved_count = save_individual_evaluations(evaluation_results, args.source_name)
+                            logger.info(f"💾 Saved {saved_count} individual JSON files for {helm_dir.name}")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Error processing {helm_dir.name}: {e}")
+                        error_count += 1
+                
+                logger.info(f"✅ Fallback processing completed:")
+                logger.info(f"   📊 Processed: {processed_count} directories")
+                logger.info(f"   🔢 Total evaluations: {total_evaluations}")
+                logger.info(f"   ❌ Errors: {error_count}")
+                
+                if processed_count == 0:
+                    logger.warning("⚠️ No evaluations were successfully processed")
+                    return 1
+                
+                # Aggregate and upload if we have data
+                if total_evaluations > 0:
+                    logger.info("📦 Aggregating and uploading to HuggingFace...")
+                    try:
+                        # Find all individual JSON files that were created
+                        eval_dir = Path("data/evaluations")
+                        if eval_dir.exists():
+                            individual_files = list(eval_dir.rglob("*.json"))
+                            
+                            if individual_files:
+                                logger.info(f"📁 Found {len(individual_files)} individual evaluation files")
+                                
+                                # Aggregate files to HuggingFace dataset format
+                                aggregated_file = aggregate_individual_files_to_hf_dataset(
+                                    [str(f) for f in individual_files], 
+                                    chunk_id=1
+                                )
+                                
+                                if aggregated_file and Path(aggregated_file).exists():
+                                    logger.info(f"✅ Aggregated data saved to {aggregated_file}")
+                                    
+                                    # Upload to HuggingFace
+                                    if not args.test_run:
+                                        logger.info(f"🚀 Uploading to HuggingFace repository: {args.repo_id}")
+                                        api = setup_hf_api(os.environ.get('HF_TOKEN'), args.repo_id)
+                                        
+                                        api.upload_file(
+                                            path_or_fileobj=aggregated_file,
+                                            path_in_repo=f"data/{Path(aggregated_file).name}",
+                                            repo_id=args.repo_id,
+                                            repo_type="dataset"
+                                        )
+                                        
+                                        logger.info("✅ Successfully uploaded to HuggingFace!")
+                                    else:
+                                        logger.info("🧪 Test mode - skipping HuggingFace upload")
+                                        
+                    except Exception as e:
+                        logger.error(f"❌ Error during aggregation/upload: {e}")
+                
+                logger.info("🎉 Complete HELM pipeline finished successfully!")
+                return 0
         
     except KeyboardInterrupt:
         logger.info("⏹️ Interrupted by user")

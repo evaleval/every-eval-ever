@@ -48,23 +48,25 @@ jobs:
           echo "🚀 SIMPLIFIED PROCESSING MODE - EvalHub Schema"
           echo "📦 Individual JSON files per evaluation"
           echo "📁 Nested folder structure: source/benchmark/subject"
-          echo "⚡ 4 parallel workers, 50 tasks/chunk (production optimized)"
+          echo "⚡ STREAMING MODE: 2 parallel workers, 20 tasks/chunk (memory optimized)"
           echo "🎯 Target: EvalHub-compliant individual evaluation files"
-          echo "🌍 Full HELM dataset (all pages)"
+          echo "🌍 Full HELM dataset (all pages) with streaming upload"
+          echo "🌊 Process -> Upload -> Clean cycle for memory efficiency"
           
-          echo "🔄 Starting EvalHub processing across all benchmarks"
+          echo "🔄 Starting EvalHub streaming processing across all benchmarks"
           
-          echo "⏳ Processing will create individual JSON files..."
+          echo "⏳ Processing will create, upload, and clean chunks..."
           
           if python scripts/helm_processor.py \
             --repo-id "${HF_REPO_ID}" \
-            --chunk-size 50 \
-            --max-workers 4 \
-            --source-name helm; then
+            --chunk-size 20 \
+            --max-workers 2 \
+            --source-name helm \
+            --helm-benchmarks lite classic mmlu; then
             echo ""
             echo "✅ STEP 1 COMPLETED SUCCESSFULLY!"
-            echo "🎉 All benchmarks processed with EvalHub schema!"
-            echo "📁 Individual JSON files created in nested structure"
+            echo "🎉 All benchmarks processed with streaming EvalHub schema!"
+            echo "🌊 Data processed, uploaded, and cleaned in memory-efficient chunks"
             echo "📅 Step 1 completed at: $(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
           else
             echo "❌ EvalHub processing failed"
