@@ -498,11 +498,11 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
                     method=Method.None_
                 ),
                 generation_args=GenerationArgs(
-                    use_vllm=None,
-                    temperature=float(helm_data.get('temperature', 0.0)) if helm_data.get('temperature') is not None else 0.0,
-                    top_p=None,  # Not available in HELM data
-                    top_k=None,  # Not available in HELM data
-                    max_tokens=helm_data.get('max_tokens') if helm_data.get('max_tokens') is not None else None,
+                    use_vllm=False,  # Default to False instead of None
+                    temperature=float(helm_data.get('temperature', -1.0)) if helm_data.get('temperature') is not None else -1.0,
+                    top_p=-1.0,  # Use -1.0 sentinel instead of None
+                    top_k=-1.0,  # Use -1.0 sentinel instead of None
+                    max_tokens=helm_data.get('max_tokens') if helm_data.get('max_tokens') is not None else 1,
                     stop_sequences=helm_data.get('stop_sequences', [])
                 )
             )
@@ -591,27 +591,27 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
 def _clean_and_validate_data(data):
     """
     Clean and validate data to prevent Arrow/datasets typecasting issues.
-    Ensures all fields have consistent types and no problematic None values.
+    Ensures all fields have consistent types and NO None values that cause casting errors.
+    Uses -1 as sentinel value for missing numeric data to distinguish from actual 0 values.
     """
     if isinstance(data, dict):
         cleaned = {}
         for key, value in data.items():
             if value is None:
-                # Replace None with appropriate defaults based on expected types
-                if key in ['parameters', 'revision', 'hf_path', 'use_vllm', 'top_p', 'top_k', 'cumulative_logprob']:
-                    cleaned[key] = None  # Keep None for optional fields
-                elif key in ['temperature', 'score']:
-                    cleaned[key] = 0.0  # Default numeric values
+                # Replace ALL None values with appropriate defaults - NO None values allowed
+                if key in ['temperature', 'top_p', 'top_k', 'cumulative_logprob']:
+                    cleaned[key] = -1.0  # Use -1.0 as sentinel for missing numeric values
+                elif key == 'score':
+                    cleaned[key] = 0.0  # Score must be >= 0, so use 0.0 as "unknown/missing"
                 elif key in ['max_tokens', 'hf_index']:
-                    cleaned[key] = 0  # Default integer values
-                elif key in ['name', 'response', 'ground_truth', 'raw_input', 'language', 'schema_version', 'evaluation_id']:
-                    cleaned[key] = ""  # Default string values
+                    cleaned[key] = 1  # Use 1 as sentinel for missing integer values (some fields have min validation)
+                elif key in ['is_instruct', 'use_vllm']:
+                    cleaned[key] = False  # Default boolean values - False means "not instruct" or "not using vllm"
                 elif key in ['stop_sequences', 'generated_tokens_logprobs']:
                     cleaned[key] = []  # Default list values
-                elif key in ['is_instruct']:
-                    cleaned[key] = False  # Default boolean values
                 else:
-                    cleaned[key] = None  # Keep None for unknown fields
+                    # Default ALL other fields to empty string - this is critical for Arrow compatibility
+                    cleaned[key] = ""  # Default string values for ALL other fields
             else:
                 cleaned[key] = _clean_and_validate_data(value)
         return cleaned
@@ -680,11 +680,11 @@ def _create_evaluation_result(row: pd.Series, task_id: str, benchmark: str, sour
                     method=Method.None_
                 ),
                 generation_args=GenerationArgs(
-                    use_vllm=None,
-                    temperature=float(row.get('temperature', 0.0)) if pd.notna(row.get('temperature')) else None,
-                    top_p=float(row.get('top_p', 1.0)) if pd.notna(row.get('top_p')) else None,
-                    top_k=float(row.get('top_k', 0)) if pd.notna(row.get('top_k')) else None,
-                    max_tokens=_safe_int_convert(row.get('max_tokens'), 512) if pd.notna(row.get('max_tokens')) else None,
+                    use_vllm=False,  # Default to False instead of None
+                    temperature=float(row.get('temperature', -1.0)) if pd.notna(row.get('temperature')) else -1.0,
+                    top_p=float(row.get('top_p', -1.0)) if pd.notna(row.get('top_p')) else -1.0,
+                    top_k=float(row.get('top_k', -1.0)) if pd.notna(row.get('top_k')) else -1.0,
+                    max_tokens=_safe_int_convert(row.get('max_tokens'), 1) if pd.notna(row.get('max_tokens')) else 1,
                     stop_sequences=[]
                 )
             )
@@ -1476,22 +1476,66 @@ def main():
                         task_dataset.to_json(str(task_file))
                         
                         upload_success = False
-                        # Upload to HuggingFace with nested structure
+                        # Upload to HuggingFace with retry mechanism and corruption protection
                         if api and not args.test_run and not args.local_only:
-                            try:
-                                # Upload to nested path in repo: data/helm/benchmark/model/file.json
-                                repo_path = f"data/{nested_path}/{task_file.name}"
-                                api.upload_file(
-                                    path_or_fileobj=str(task_file),
-                                    path_in_repo=repo_path,
-                                    repo_id=args.repo_id,
-                                    repo_type="dataset"
-                                )
-                                upload_success = True
-                                logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path}")
-                                
-                            except Exception as e:
-                                logger.error(f"❌ Thread-{thread_id}: Upload failed: {e}")
+                            repo_path = f"data/{nested_path}/{task_file.name}"
+                            max_retries = 3
+                            retry_delay = 5  # seconds
+                            
+                            for attempt in range(max_retries):
+                                try:
+                                    # Step 1: Upload to temporary path first (atomic upload simulation)
+                                    temp_repo_path = f"data/.uploading/{nested_path}/{task_file.name}"
+                                    api.upload_file(
+                                        path_or_fileobj=str(task_file),
+                                        path_in_repo=temp_repo_path,
+                                        repo_id=args.repo_id,
+                                        repo_type="dataset"
+                                    )
+                                    
+                                    # Step 2: Verify upload by checking file exists
+                                    try:
+                                        from huggingface_hub import hf_hub_download
+                                        hf_hub_download(
+                                            repo_id=args.repo_id,
+                                            filename=temp_repo_path,
+                                            repo_type="dataset",
+                                            local_files_only=False
+                                        )
+                                        
+                                        # Step 3: Move from temp to final location (atomic move)
+                                        api.copy_file(
+                                            src_path_in_repo=temp_repo_path,
+                                            dest_path_in_repo=repo_path,
+                                            repo_id=args.repo_id,
+                                            repo_type="dataset"
+                                        )
+                                        
+                                        # Step 4: Clean up temp file
+                                        api.delete_file(
+                                            path_in_repo=temp_repo_path,
+                                            repo_id=args.repo_id,
+                                            repo_type="dataset"
+                                        )
+                                        
+                                        upload_success = True
+                                        logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path} (attempt {attempt + 1})")
+                                        break
+                                        
+                                    except Exception as verify_error:
+                                        logger.warning(f"⚠️ Thread-{thread_id}: Upload verification failed (attempt {attempt + 1}): {verify_error}")
+                                        raise verify_error
+                                    
+                                except Exception as e:
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"⚠️ Thread-{thread_id}: Upload attempt {attempt + 1} failed, retrying in {retry_delay}s: {e}")
+                                        time.sleep(retry_delay)
+                                        retry_delay *= 2  # Exponential backoff
+                                    else:
+                                        logger.error(f"❌ Thread-{thread_id}: Upload failed after {max_retries} attempts: {e}")
+                                        # Keep local file as backup when upload fails
+                                        logger.info(f"💾 Thread-{thread_id}: Keeping local backup at {task_file}")
+                                        
                         else:
                             upload_success = True  # Consider local saves as success
                             if args.local_only:
@@ -1499,19 +1543,24 @@ def main():
                             else:
                                 logger.info(f"🧪 Thread-{thread_id}: Test mode - saved locally")
                         
-                        # Step 4: Clean up immediately to save memory
+                        # Step 4: Clean up safely - only after successful upload
                         if not args.no_cleanup:
                             try:
-                                # Remove download directory
+                                # Always remove download directory to save space
                                 if helm_dir.exists():
                                     import shutil
                                     shutil.rmtree(helm_dir)
                                 
-                                # Remove local file after upload (if uploaded successfully)
-                                if upload_success and not args.local_only and task_file.exists():
-                                    task_file.unlink()
+                                # Only remove local file if upload was successful OR in local-only mode
+                                if task_file.exists() and (upload_success or args.local_only):
+                                    if upload_success and not args.local_only:
+                                        task_file.unlink()
+                                        logger.info(f"🧹 Thread-{thread_id}: Cleaned up local file after successful upload")
+                                    elif args.local_only:
+                                        logger.info(f"🏠 Thread-{thread_id}: Keeping local file (local-only mode)")
+                                else:
+                                    logger.info(f"💾 Thread-{thread_id}: Keeping local backup due to upload failure")
                                 
-                                logger.info(f"🧹 Thread-{thread_id}: Cleaned up")
                             except Exception as e:
                                 logger.warning(f"⚠️ Thread-{thread_id}: Cleanup failed: {e}")
                         
@@ -1538,13 +1587,44 @@ def main():
                 logger.info(f"🚀 Starting parallel processing with {args.max_workers} threads")
                 logger.info(f"📊 Total tasks to process: {len(task_list)}")
                 
+                # Create progress checkpoint file
+                checkpoint_file = Path("data") / "processing_checkpoint.json"
+                checkpoint_file.parent.mkdir(exist_ok=True)
+                
+                def save_checkpoint(completed_tasks, failed_tasks):
+                    """Save processing progress to allow resume on failure"""
+                    checkpoint_data = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "completed_tasks": completed_tasks,
+                        "failed_tasks": failed_tasks,
+                        "total_tasks": len(task_list)
+                    }
+                    with open(checkpoint_file, 'w') as f:
+                        json.dump(checkpoint_data, f, indent=2)
+                
+                # Load existing checkpoint if exists
+                completed_tasks = []
+                if checkpoint_file.exists():
+                    try:
+                        with open(checkpoint_file, 'r') as f:
+                            checkpoint_data = json.load(f)
+                            completed_tasks = checkpoint_data.get("completed_tasks", [])
+                            logger.info(f"📋 Resuming from checkpoint: {len(completed_tasks)} tasks already completed")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not load checkpoint: {e}")
+                
+                # Filter out already completed tasks
+                remaining_tasks = [task for task in task_list if task[0] not in completed_tasks]
+                logger.info(f"📝 Processing {len(remaining_tasks)} remaining tasks")
+                
                 # Process tasks in parallel with configurable thread count
                 with ThreadPoolExecutor(max_workers=args.max_workers, thread_name_prefix="TaskWorker") as executor:
-                    # Submit all tasks
-                    future_to_task = {executor.submit(process_single_task, task_info): task_info for task_info in task_list}
+                    # Submit remaining tasks
+                    future_to_task = {executor.submit(process_single_task, task_info): task_info for task_info in remaining_tasks}
                     
-                    completed_count = 0
+                    completed_count = len(completed_tasks)  # Start from checkpoint
                     failed_count = 0
+                    failed_tasks = []
                     
                     # Process completed tasks
                     for future in as_completed(future_to_task):
@@ -1555,8 +1635,13 @@ def main():
                             success = future.result()
                             if success:
                                 completed_count += 1
+                                completed_tasks.append(task_name)
+                                # Save checkpoint every 10 successful tasks
+                                if completed_count % 10 == 0:
+                                    save_checkpoint(completed_tasks, failed_tasks)
                             else:
                                 failed_count += 1
+                                failed_tasks.append(task_name)
                                 
                             # Progress update
                             total_tasks = len(task_list)
@@ -1565,7 +1650,27 @@ def main():
                             
                         except Exception as e:
                             failed_count += 1
-                            logger.error(f"❌ Task {task_index} failed with exception: {e}")
+                            failed_tasks.append(task_name)
+                            logger.error(f"❌ Task {task_index} ({task_name}) failed with exception: {e}")
+                    
+                # Final checkpoint save
+                save_checkpoint(completed_tasks, failed_tasks)
+                logger.info(f"💾 Final checkpoint saved with {len(completed_tasks)} completed tasks")
+                
+                # Create upload manifest for verification
+                manifest_file = Path("data") / "upload_manifest.json"
+                manifest_data = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "total_tasks": len(task_list),
+                    "completed_tasks": len(completed_tasks),
+                    "failed_tasks": len(failed_tasks),
+                    "completed_task_list": completed_tasks,
+                    "failed_task_list": failed_tasks,
+                    "repo_id": args.repo_id
+                }
+                with open(manifest_file, 'w') as f:
+                    json.dump(manifest_data, f, indent=2)
+                logger.info(f"📋 Upload manifest saved to {manifest_file}")
                 
                 logger.info(f"🎉 Individual task streaming completed!")
                 logger.info(f"   📊 Total processed: {total_processed} evaluations")

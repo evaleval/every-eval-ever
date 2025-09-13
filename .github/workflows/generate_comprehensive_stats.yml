@@ -16,7 +16,7 @@ jobs:
   generate_comprehensive_stats:
     name: Generate Comprehensive Statistics (Standalone/Fallback)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 35791  # Maximum possible timeout (~596 hours / ~25 days)
 
     steps:
       - name: Checkout repository
