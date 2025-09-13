@@ -104,71 +104,128 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
     evaluation_results = []
     
     try:
-        # Check if this directory has the expected HELM files
-        expected_files = ["instances.json", "display_predictions.json", "run_spec.json"]
-        missing_files = [f for f in expected_files if not (helm_dir / f).exists()]
+        # Load required HELM files
+        instances_file = helm_dir / "instances.json"
+        run_spec_file = helm_dir / "run_spec.json"
+        per_instance_stats_file = helm_dir / "per_instance_stats.json"
         
-        if missing_files:
-            logger.warning(f"⚠️ Skipping {helm_dir.name}: missing files {missing_files}")
+        # Check which files exist
+        if not instances_file.exists():
+            logger.warning(f"⚠️ Skipping {helm_dir.name}: missing instances.json")
+            return []
+        if not run_spec_file.exists():
+            logger.warning(f"⚠️ Skipping {helm_dir.name}: missing run_spec.json")
             return []
         
-        # Load the HELM JSON files
-        instances_file = helm_dir / "instances.json"
-        predictions_file = helm_dir / "display_predictions.json"
-        run_spec_file = helm_dir / "run_spec.json"
-        
-        # Load and verify the data
+        # Load the data
         with open(instances_file, 'r') as f:
             instances = json.load(f)
-        with open(predictions_file, 'r') as f:
-            predictions = json.load(f)
         with open(run_spec_file, 'r') as f:
             run_spec = json.load(f)
         
+        # Load per-instance stats if available
+        per_instance_stats = []
+        if per_instance_stats_file.exists():
+            with open(per_instance_stats_file, 'r') as f:
+                per_instance_stats = json.load(f)
+        
         logger.info(f"📄 Loaded HELM files for {helm_dir.name}")
         logger.info(f"   📊 Instances: {len(instances) if isinstance(instances, list) else 'N/A'}")
-        logger.info(f"   🎯 Predictions: {len(predictions) if isinstance(predictions, list) else 'N/A'}")
+        logger.info(f"   🎯 Stats: {len(per_instance_stats) if per_instance_stats else 'N/A'}")
         
-        # Determine benchmark from run_spec or directory name
+        # Extract model info from run_spec
+        adapter_spec = run_spec.get("adapter_spec", {})
+        model_name = adapter_spec.get("model", "unknown")
+        model_deployment = adapter_spec.get("model_deployment", model_name)
+        
+        # Extract benchmark info
+        scenario_spec = run_spec.get("scenario_spec", {})
+        scenario_class = scenario_spec.get("class_name", "")
+        
+        # Determine benchmark name from scenario class
         benchmark = "unknown"
-        try:
-            if run_spec and isinstance(run_spec, dict):
-                scenario_spec = run_spec.get("scenario_spec", {})
-                if scenario_spec and isinstance(scenario_spec, dict):
-                    benchmark = scenario_spec.get("class_name", "unknown")
-            
-            if benchmark == "unknown":
-                # Extract from directory name
-                task_name = helm_dir.name
-                for known_benchmark in ["mmlu", "hellaswag", "boolq", "commonsense", "babi_qa"]:
-                    if known_benchmark in task_name.lower():
-                        benchmark = known_benchmark
-                        break
-        except Exception as e:
-            logger.warning(f"⚠️ Could not determine benchmark: {e}")
+        if "gsm" in scenario_class.lower():
+            benchmark = "gsm8k"
+        elif "mmlu" in scenario_class.lower():
+            benchmark = "mmlu"
+        elif "hellaswag" in scenario_class.lower():
+            benchmark = "hellaswag"
+        elif "commonsense" in scenario_class.lower():
+            benchmark = "commonsense"
+        elif "boolq" in scenario_class.lower():
+            benchmark = "boolq"
+        elif "babi" in scenario_class.lower():
+            benchmark = "babi_qa"
+        else:
+            # Fallback to directory name parsing
+            task_name = helm_dir.name.lower()
+            for known_benchmark in ["gsm", "mmlu", "hellaswag", "boolq", "commonsense", "babi_qa"]:
+                if known_benchmark in task_name:
+                    benchmark = known_benchmark
+                    break
         
-        # Process predictions into EvaluationResult format
-        if isinstance(predictions, list):
-            for i, prediction in enumerate(predictions):
+        # Create stats lookup by instance_id
+        stats_by_id = {}
+        if per_instance_stats:
+            for stat_entry in per_instance_stats:
+                instance_id = stat_entry.get("instance_id")
+                if instance_id:
+                    stats_by_id[instance_id] = stat_entry
+        
+        # Process each instance
+        if isinstance(instances, list):
+            for i, instance in enumerate(instances):
                 try:
-                    instance_id = _extract_numeric_id(prediction.get("instance", {}).get("instance_id", i))
+                    instance_id = instance.get("id", f"instance_{i}")
                     
-                    # Create a row with the prediction data
-                    row = pd.Series({
+                    # Get input text
+                    input_text = ""
+                    if "input" in instance and isinstance(instance["input"], dict):
+                        input_text = instance["input"].get("text", "")
+                    
+                    # Get reference/ground truth
+                    ground_truth = ""
+                    if "references" in instance and isinstance(instance["references"], list) and instance["references"]:
+                        ref = instance["references"][0]  # Take first reference
+                        if isinstance(ref, dict) and "output" in ref:
+                            ground_truth = ref["output"].get("text", "")
+                    
+                    # Get stats for this instance
+                    instance_stats = stats_by_id.get(instance_id, {})
+                    
+                    # Extract evaluation metrics
+                    score = 0.0
+                    predicted_text = ""
+                    
+                    # Look for prediction in stats
+                    if "stats" in instance_stats:
+                        for stat in instance_stats["stats"]:
+                            stat_name = stat.get("name", {}).get("name", "")
+                            if "exact_match" in stat_name or "final_number_exact_match" in stat_name:
+                                score = float(stat.get("mean", 0.0))
+                                break
+                    
+                    # Create structured data for EvaluationResult
+                    helm_data = {
                         'instance_id': instance_id,
-                        'predicted_text': prediction.get("predicted_text", ""),
-                        'prediction_score': prediction.get("prediction_score", 0.0),
-                        'correct': prediction.get("correct", False),
-                        'request_state': prediction.get("request_state", {}),
-                        'stats': prediction.get("stats", {}),
-                        'instance': prediction.get("instance", {})
-                    })
+                        'model': model_name,
+                        'model_deployment': model_deployment,
+                        'input_text': input_text,
+                        'ground_truth': ground_truth,
+                        'predicted_text': predicted_text,  # Not available in these files
+                        'score': score,
+                        'split': instance.get("split", "test"),
+                        'benchmark': benchmark,
+                        'temperature': adapter_spec.get("temperature", 0.0),
+                        'max_tokens': adapter_spec.get("max_tokens"),
+                        'stop_sequences': adapter_spec.get("stop_sequences", []),
+                        'task_name': helm_dir.name
+                    }
                     
-                    # Create EvaluationResult using the existing function
-                    result = _create_evaluation_result(
-                        row=row,
+                    # Create EvaluationResult
+                    result = _create_evaluation_result_from_helm(
+                        helm_data=helm_data,
                         task_id=f'{helm_dir.name}_{instance_id}',
-                        benchmark=benchmark,
                         source=source_name
                     )
                     
@@ -184,7 +241,7 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
         # Calculate accuracy for this directory
         if evaluation_results:
             correct_count = sum(1 for result in evaluation_results 
-                              if 'evaluation' in result and result['evaluation'].get('score', 0) == 1.0)
+                              if 'evaluation' in result and result['evaluation'].get('score', 0) > 0.5)
             accuracy = correct_count / len(evaluation_results) if evaluation_results else 0
             logger.info(f"📈 Accuracy: {correct_count}/{len(evaluation_results)} ({accuracy:.2%})")
         
@@ -375,6 +432,151 @@ def _is_instruct_model(model_name: str) -> bool:
     instruct_indicators = ['instruct', 'chat', 'turbo', 'gpt-4', 'gpt-3.5', 'claude']
     model_lower = model_name.lower()
     return any(indicator in model_lower for indicator in instruct_indicators)
+
+
+def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: str) -> dict:
+    """Create a proper EvaluationResult object from HELM data."""
+    
+    if not EVALHUB_SCHEMA_AVAILABLE:
+        logger.error("Cannot create EvaluationResult - schema not available")
+        return None
+    
+    try:
+        # Extract model info from HELM data
+        model_name = helm_data.get('model', 'unknown')
+        model_deployment = helm_data.get('model_deployment', model_name)
+        
+        # Parse model name to extract family
+        model_family = _map_family_to_enum(model_name)
+        
+        # Create Model object
+        model = Model(
+            model_info=ModelInfo(
+                name=model_deployment,
+                family=model_family
+            ),
+            configuration=Configuration(
+                architecture=Architecture.transformer,  # Default assumption for HELM models
+                parameters=None,  # Not available in HELM data
+                context_window=4096,  # Default assumption
+                is_instruct=_is_instruct_model(model_name),
+                hf_path=model_name if '/' in model_name else None,
+                revision=None
+            ),
+            inference_settings=InferenceSettings(
+                quantization=Quantization(
+                    bit_precision=BitPrecision.none,
+                    method=Method.None_
+                ),
+                generation_args=GenerationArgs(
+                    use_vllm=None,
+                    temperature=float(helm_data.get('temperature', 0.0)),
+                    top_p=None,  # Not available in HELM data
+                    top_k=None,  # Not available in HELM data
+                    max_tokens=helm_data.get('max_tokens'),
+                    stop_sequences=helm_data.get('stop_sequences', [])
+                )
+            )
+        )
+        
+        # Create PromptConfig object
+        benchmark = helm_data.get('benchmark', 'unknown')
+        prompt_class_str = _determine_prompt_class_from_benchmark(benchmark)
+        prompt_config = PromptConfig(
+            prompt_class=_map_prompt_class_to_enum(prompt_class_str),
+            dimensions=None
+        )
+        
+        # Create Instance object
+        task_type_str = _determine_task_type_from_benchmark(benchmark)
+        split_str = helm_data.get('split', 'test')
+        hf_split_mapping = {'test': HfSplit.test, 'train': HfSplit.train, 'validation': HfSplit.validation}
+        
+        instance = Instance(
+            task_type=_map_task_type_to_enum(task_type_str),
+            raw_input=helm_data.get('input_text', ''),
+            language='en',  # Default assumption
+            sample_identifier=SampleIdentifier(
+                dataset_name=f"helm.benchmark.scenarios.{benchmark}",
+                hf_repo=f"helm/helm.benchmark.scenarios.{benchmark}",
+                hf_split=hf_split_mapping.get(split_str, HfSplit.test),
+                hf_index=_extract_numeric_id(helm_data.get('instance_id', '0'))
+            )
+        )
+        
+        # Create Output object  
+        output = Output(
+            response=helm_data.get('predicted_text', ''),
+            cumulative_logprob=None,  # Not available in HELM data
+            generated_tokens_logprobs=None  # Not available in HELM data
+        )
+        
+        # Create Evaluation object
+        evaluation = Evaluation(
+            evaluation_method=EvaluationMethod(
+                method_name='exact_match',  # Most common HELM metric
+                description='Exact string match between prediction and ground truth',
+                parameters=None
+            ),
+            ground_truth=helm_data.get('ground_truth', ''),
+            score=float(helm_data.get('score', 0.0))
+        )
+        
+        # Create the complete EvaluationResult
+        eval_result = EvaluationResult(
+            schema_version='1.0.0',
+            evaluation_id=f"{source}_{helm_data.get('benchmark')}_{task_id}_{helm_data.get('instance_id', '0')}",
+            model=model,
+            prompt_config=prompt_config,
+            instance=instance,
+            output=output,
+            evaluation=evaluation
+        )
+        
+        # Convert to dict for dataset storage, ensuring enums are converted to strings
+        result_dict = eval_result.model_dump()
+        
+        # Convert enum values to strings for Arrow compatibility
+        def convert_enums_to_strings(obj):
+            if isinstance(obj, dict):
+                return {k: convert_enums_to_strings(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_enums_to_strings(item) for item in obj]
+            elif hasattr(obj, 'value'):  # Enum object
+                return obj.value
+            else:
+                return obj
+        
+        result_dict = convert_enums_to_strings(result_dict)
+        return result_dict
+        
+    except Exception as e:
+        logger.error(f"Failed to create EvaluationResult from HELM data: {e}")
+        return None
+
+
+def _determine_prompt_class_from_benchmark(benchmark: str) -> str:
+    """Determine the prompt class based on benchmark."""
+    # Multiple choice benchmarks
+    if benchmark.lower() in ['mmlu', 'hellaswag', 'commonsense', 'boolq']:
+        return 'MultipleChoice'
+    # Generation benchmarks
+    elif benchmark.lower() in ['gsm8k', 'gsm', 'babi_qa']:
+        return 'Generate'
+    else:
+        return 'Other'
+
+
+def _determine_task_type_from_benchmark(benchmark: str) -> str:
+    """Determine the task type based on benchmark."""
+    # Classification benchmarks
+    if benchmark.lower() in ['mmlu', 'hellaswag', 'commonsense', 'boolq']:
+        return 'classification'
+    # Generation benchmarks  
+    elif benchmark.lower() in ['gsm8k', 'gsm', 'babi_qa']:
+        return 'generation'
+    else:
+        return 'other'
 
 
 def _create_evaluation_result(row: pd.Series, task_id: str, benchmark: str, source: str) -> dict:
@@ -927,24 +1129,51 @@ def main():
                         # Create dataset for this single task
                         task_dataset = Dataset.from_list(evaluation_results)
                         
-                        # Save locally with unique filename
-                        agg_dir = Path("data/aggregated")
-                        agg_dir.mkdir(parents=True, exist_ok=True)
-                        task_file = agg_dir / f"task_{task_index:04d}_{task_name.replace('/', '_').replace(':', '_')[:50]}_evalhub.json"
+                        # Extract model and benchmark info for nested structure
+                        first_result = evaluation_results[0] if evaluation_results else {}
+                        model_name = first_result.get('model', {}).get('model_info', {}).get('name', 'unknown')
+                        benchmark_name = 'unknown'
+                        
+                        # Extract benchmark from task name
+                        if 'gsm' in task_name.lower():
+                            benchmark_name = 'gsm8k'
+                        elif 'mmlu' in task_name.lower():
+                            benchmark_name = 'mmlu'
+                        elif 'hellaswag' in task_name.lower():
+                            benchmark_name = 'hellaswag'
+                        elif 'commonsense' in task_name.lower():
+                            benchmark_name = 'commonsense'
+                        elif 'boolq' in task_name.lower():
+                            benchmark_name = 'boolq'
+                        elif 'babi' in task_name.lower():
+                            benchmark_name = 'babi_qa'
+                        
+                        # Clean model name for filesystem
+                        clean_model = model_name.replace('/', '_').replace(':', '_').replace(' ', '_')
+                        
+                        # Create nested directory structure: source/benchmark/model/
+                        nested_path = f"helm/{benchmark_name}/{clean_model}"
+                        
+                        # Save locally with nested structure
+                        local_nested_dir = Path("data/aggregated") / nested_path
+                        local_nested_dir.mkdir(parents=True, exist_ok=True)
+                        task_file = local_nested_dir / f"{task_name.replace('/', '_').replace(':', '_')}_evalhub.json"
                         task_dataset.to_json(str(task_file))
                         
                         upload_success = False
-                        # Upload to HuggingFace immediately
+                        # Upload to HuggingFace with nested structure
                         if api and not args.test_run and not args.local_only:
                             try:
+                                # Upload to nested path in repo: data/helm/benchmark/model/file.json
+                                repo_path = f"data/{nested_path}/{task_file.name}"
                                 api.upload_file(
                                     path_or_fileobj=str(task_file),
-                                    path_in_repo=f"data/{task_file.name}",
+                                    path_in_repo=repo_path,
                                     repo_id=args.repo_id,
                                     repo_type="dataset"
                                 )
                                 upload_success = True
-                                logger.info(f"✅ Thread-{thread_id}: Uploaded to HuggingFace")
+                                logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path}")
                                 
                             except Exception as e:
                                 logger.error(f"❌ Thread-{thread_id}: Upload failed: {e}")
