@@ -183,19 +183,25 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
                     if "input" in instance and isinstance(instance["input"], dict):
                         input_text = instance["input"].get("text", "")
                     
-                    # Get reference/ground truth
-                    ground_truth = ""
+                    # Get model's actual output/prediction
+                    predicted_text = ""
                     if "references" in instance and isinstance(instance["references"], list) and instance["references"]:
                         ref = instance["references"][0]  # Take first reference
-                        if isinstance(ref, dict) and "output" in ref:
-                            ground_truth = ref["output"].get("text", "")
+                        if isinstance(ref, dict) and "output" in ref and isinstance(ref["output"], dict):
+                            predicted_text = ref["output"].get("text", "")
+                    
+                    # Get ground truth (would be in a separate field or file)
+                    # For now, we don't have access to the ground truth in this file structure
+                    ground_truth = ""
                     
                     # Get stats for this instance
                     instance_stats = stats_by_id.get(instance_id, {})
                     
                     # Extract evaluation metrics
                     score = 0.0
-                    predicted_text = ""
+                    
+                    # NOTE: We now have the model's actual prediction from references[0].output.text
+                    # The ground truth/correct answer would be in a separate field or file
                     
                     # Look for prediction in stats
                     if "stats" in instance_stats:
@@ -506,7 +512,7 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
         
         # Create Output object  
         output = Output(
-            response=helm_data.get('predicted_text', ''),
+            response=helm_data.get('predicted_text', ''),  # Raw model output when available
             cumulative_logprob=None,  # Not available in HELM data
             generated_tokens_logprobs=None  # Not available in HELM data
         )
@@ -1132,27 +1138,38 @@ def main():
                         # Extract model and benchmark info for nested structure
                         first_result = evaluation_results[0] if evaluation_results else {}
                         model_name = first_result.get('model', {}).get('model_info', {}).get('name', 'unknown')
-                        benchmark_name = 'unknown'
                         
-                        # Extract benchmark from task name
-                        if 'gsm' in task_name.lower():
-                            benchmark_name = 'gsm8k'
-                        elif 'mmlu' in task_name.lower():
-                            benchmark_name = 'mmlu'
+                        # Use the actual HELM benchmark (lite, classic, mmlu) passed to this function
+                        helm_benchmark = benchmark  # This comes from benchmark_map and is the correct HELM benchmark
+                        
+                        # Extract dataset name from task name
+                        dataset_name = 'unknown'
+                        if ':dataset=' in task_name:
+                            # Extract dataset from task name like "commonsense:dataset=openbookqa,method=..."
+                            dataset_part = task_name.split(':dataset=')[1].split(',')[0]
+                            dataset_name = dataset_part
+                        elif ':subject=' in task_name:
+                            # Extract subject from MMLU task like "mmlu:subject=clinical_knowledge,method=..."
+                            subject_part = task_name.split(':subject=')[1].split(',')[0]
+                            dataset_name = subject_part
+                        elif 'gsm' in task_name.lower():
+                            dataset_name = 'gsm8k'
                         elif 'hellaswag' in task_name.lower():
-                            benchmark_name = 'hellaswag'
-                        elif 'commonsense' in task_name.lower():
-                            benchmark_name = 'commonsense'
+                            dataset_name = 'hellaswag'
                         elif 'boolq' in task_name.lower():
-                            benchmark_name = 'boolq'
+                            dataset_name = 'boolq'
                         elif 'babi' in task_name.lower():
-                            benchmark_name = 'babi_qa'
+                            dataset_name = 'babi_qa'
+                        else:
+                            # Fallback: extract first part of task name
+                            dataset_name = task_name.split(':')[0] if ':' in task_name else task_name
                         
-                        # Clean model name for filesystem
+                        # Clean names for filesystem
                         clean_model = model_name.replace('/', '_').replace(':', '_').replace(' ', '_')
+                        clean_dataset = dataset_name.replace('/', '_').replace(':', '_').replace(' ', '_')
                         
-                        # Create nested directory structure: source/benchmark/model/
-                        nested_path = f"helm/{benchmark_name}/{clean_model}"
+                        # Create nested directory structure: helm/benchmark/dataset/model/
+                        nested_path = f"helm/{helm_benchmark}/{clean_dataset}/{clean_model}"
                         
                         # Save locally with nested structure
                         local_nested_dir = Path("data/aggregated") / nested_path
