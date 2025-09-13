@@ -108,6 +108,7 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
         instances_file = helm_dir / "instances.json"
         run_spec_file = helm_dir / "run_spec.json"
         per_instance_stats_file = helm_dir / "per_instance_stats.json"
+        display_predictions_file = helm_dir / "display_predictions.json"
         
         # Check which files exist
         if not instances_file.exists():
@@ -116,12 +117,17 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
         if not run_spec_file.exists():
             logger.warning(f"⚠️ Skipping {helm_dir.name}: missing run_spec.json")
             return []
+        if not display_predictions_file.exists():
+            logger.warning(f"⚠️ Skipping {helm_dir.name}: missing display_predictions.json")
+            return []
         
         # Load the data
         with open(instances_file, 'r') as f:
             instances = json.load(f)
         with open(run_spec_file, 'r') as f:
             run_spec = json.load(f)
+        with open(display_predictions_file, 'r') as f:
+            display_predictions = json.load(f)
         
         # Load per-instance stats if available
         per_instance_stats = []
@@ -132,6 +138,11 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
         logger.info(f"📄 Loaded HELM files for {helm_dir.name}")
         logger.info(f"   📊 Instances: {len(instances) if isinstance(instances, list) else 'N/A'}")
         logger.info(f"   🎯 Stats: {len(per_instance_stats) if per_instance_stats else 'N/A'}")
+        logger.info(f"   🤖 Predictions: {len(display_predictions) if isinstance(display_predictions, list) else 'N/A'}")
+        
+        # Create lookup dictionaries for efficient mapping by instance_id
+        predictions_map = {pred.get("instance_id"): pred for pred in display_predictions}
+        stats_map = {stat.get("instance_id"): stat for stat in per_instance_stats}
         
         # Extract model info from run_spec
         adapter_spec = run_spec.get("adapter_spec", {})
@@ -172,75 +183,87 @@ def process_helm_directory(helm_dir: Path, source_name: str) -> List[Dict]:
                 if instance_id:
                     stats_by_id[instance_id] = stat_entry
         
-        # Process each instance
-        if isinstance(instances, list):
-            for i, instance in enumerate(instances):
-                try:
-                    instance_id = instance.get("id", f"instance_{i}")
+        # Process each instance by matching with predictions
+        instances_dict = {instance.get("id"): instance for instance in instances}
+        
+        for prediction in display_predictions:
+            try:
+                instance_id = prediction.get("instance_id")
+                if not instance_id or instance_id not in instances_dict:
+                    continue
+                
+                instance = instances_dict[instance_id]
+                
+                # Extract input text from instance
+                input_text = instance.get("input", {}).get("text", "")
+                
+                # Extract ground truth from instance references (marked with "correct" tag)
+                ground_truth = ""
+                references = instance.get("references", [])
+                if references:
+                    for ref in references:
+                        if "correct" in ref.get("tags", []):
+                            ground_truth = ref.get("output", {}).get("text", "")
+                            break
+                    # If no "correct" tag found, use first reference as fallback
+                    if not ground_truth and references:
+                        ground_truth = references[0].get("output", {}).get("text", "")
+                
+                # Extract model prediction from display_predictions (THE KEY FIX!)
+                predicted_text = prediction.get("predicted_text", "")
+                
+                # Extract evaluation metrics from per_instance_stats
+                score = 0.0
+                instance_stats = stats_map.get(instance_id, {})
+                if "stats" in instance_stats:
+                    stats_list = instance_stats["stats"]
+                    # Try different metric names in order of preference
+                    metric_names = [
+                        "exact_match_indicator",
+                        "final_number_exact_match", 
+                        "quasi_exact_match",
+                        "exact_match"
+                    ]
                     
-                    # Get input text
-                    input_text = ""
-                    if "input" in instance and isinstance(instance["input"], dict):
-                        input_text = instance["input"].get("text", "")
-                    
-                    # Get model's actual output/prediction
-                    predicted_text = ""
-                    if "references" in instance and isinstance(instance["references"], list) and instance["references"]:
-                        ref = instance["references"][0]  # Take first reference
-                        if isinstance(ref, dict) and "output" in ref and isinstance(ref["output"], dict):
-                            predicted_text = ref["output"].get("text", "")
-                    
-                    # Get ground truth (would be in a separate field or file)
-                    # For now, we don't have access to the ground truth in this file structure
-                    ground_truth = ""
-                    
-                    # Get stats for this instance
-                    instance_stats = stats_by_id.get(instance_id, {})
-                    
-                    # Extract evaluation metrics
-                    score = 0.0
-                    
-                    # NOTE: We now have the model's actual prediction from references[0].output.text
-                    # The ground truth/correct answer would be in a separate field or file
-                    
-                    # Look for prediction in stats
-                    if "stats" in instance_stats:
-                        for stat in instance_stats["stats"]:
+                    for metric_name in metric_names:
+                        for stat in stats_list:
                             stat_name = stat.get("name", {}).get("name", "")
-                            if "exact_match" in stat_name or "final_number_exact_match" in stat_name:
+                            if stat_name == metric_name:
                                 score = float(stat.get("mean", 0.0))
                                 break
+                        if score > 0:  # Found a metric
+                            break
+                
+                # Create structured data for EvaluationResult
+                helm_data = {
+                    'instance_id': instance_id,
+                    'model': model_name,
+                    'model_deployment': model_deployment,
+                    'input_text': input_text,
+                    'ground_truth': ground_truth,
+                    'predicted_text': predicted_text,  # Now correctly from display_predictions!
+                    'score': score,
+                    'split': instance.get("split", "test"),
+                    'benchmark': benchmark,
+                    'temperature': adapter_spec.get("temperature", 0.0),
+                    'max_tokens': adapter_spec.get("max_tokens"),
+                    'stop_sequences': adapter_spec.get("stop_sequences", []),
+                    'task_name': helm_dir.name
+                }
+                
+                # Create EvaluationResult
+                result = _create_evaluation_result_from_helm(
+                    helm_data=helm_data,
+                    task_id=f'{helm_dir.name}_{instance_id}',
+                    source=source_name
+                )
+                
+                if result:
+                    evaluation_results.append(result)
                     
-                    # Create structured data for EvaluationResult
-                    helm_data = {
-                        'instance_id': instance_id,
-                        'model': model_name,
-                        'model_deployment': model_deployment,
-                        'input_text': input_text,
-                        'ground_truth': ground_truth,
-                        'predicted_text': predicted_text,  # Not available in these files
-                        'score': score,
-                        'split': instance.get("split", "test"),
-                        'benchmark': benchmark,
-                        'temperature': adapter_spec.get("temperature", 0.0),
-                        'max_tokens': adapter_spec.get("max_tokens"),
-                        'stop_sequences': adapter_spec.get("stop_sequences", []),
-                        'task_name': helm_dir.name
-                    }
-                    
-                    # Create EvaluationResult
-                    result = _create_evaluation_result_from_helm(
-                        helm_data=helm_data,
-                        task_id=f'{helm_dir.name}_{instance_id}',
-                        source=source_name
-                    )
-                    
-                    if result:
-                        evaluation_results.append(result)
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not process instance {i}: {e}")
-                    continue
+            except Exception as e:
+                logger.warning(f"⚠️ Could not process prediction for instance {instance_id}: {e}")
+                continue
         
         logger.info(f"🎯 Created {len(evaluation_results)} EvaluationResult objects")
         
