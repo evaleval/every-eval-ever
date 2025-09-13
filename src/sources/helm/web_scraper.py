@@ -3,6 +3,13 @@ import asyncio
 import os
 import logging
 import sys
+from pathlib import Path
+
+# Add project root to path - go up 4 levels from this file to reach project root
+current_file = Path(__file__).absolute()
+project_root = current_file.parent.parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 import pandas as pd
 from playwright.async_api import async_playwright
@@ -21,12 +28,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def scrape_helm_data(benchmark: str):
+async def scrape_helm_data(benchmark: str, max_pages: int = None):
     """
     Scrape HELM data using direct URL navigation with proper page refresh
     to prevent caching issues.
     """
     logger.info(f"🌐 Starting web scrape for HELM benchmark: {benchmark}")
+    if max_pages:
+        logger.info(f"📄 Limited to {max_pages} pages for testing")
     all_data = []
 
     async with async_playwright() as playwright:
@@ -50,13 +59,16 @@ async def scrape_helm_data(benchmark: str):
         ))
 
         page_number = 1
-        max_pages = 100  # Safety limit
+        safety_limit = 100  # Safety limit
+        page_limit = min(max_pages, safety_limit) if max_pages else safety_limit
         consecutive_empty_pages = 0
         max_empty_pages = 3  # Stop after 3 consecutive pages with no data
 
         print("Starting to scrape HELM data...")
+        if max_pages:
+            print(f"Limited to {max_pages} pages for testing...")
 
-        while page_number <= max_pages and consecutive_empty_pages < max_empty_pages:
+        while page_number <= page_limit and consecutive_empty_pages < max_empty_pages:
             print(f"Processing page {page_number}...")
 
             # Full URL including hash
@@ -147,8 +159,8 @@ async def scrape_helm_data(benchmark: str):
     return all_data
 
 
-async def main(benchmark: str, output_dir: str):
-    data = await scrape_helm_data(benchmark)
+async def main(benchmark: str, output_dir: str, max_pages: int = None):
+    data = await scrape_helm_data(benchmark, max_pages)
 
     if data:
         # Create DataFrame and save to CSV
@@ -185,5 +197,11 @@ if __name__ == "__main__":
         default=str(BENCHMARK_CSVS_DIR),
         help="The directory to save the output CSV file."
     )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Maximum number of pages to scrape (for testing). If not specified, scrapes all pages."
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.benchmark, args.output_dir))
+    asyncio.run(main(args.benchmark, args.output_dir, args.max_pages))

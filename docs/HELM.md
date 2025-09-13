@@ -6,10 +6,10 @@
 
 ```bash
 # Test processing (works immediately)
-python scripts/simple_helm_processor_evalhub.py --test-run
+python scripts/helm_processor.py --test-run
 
 # Full processing (requires HELM data collection first)
-python scripts/simple_helm_processor_evalhub.py --repo-id evaleval/every_eval_ever
+python scripts/helm_processor.py --repo-id evaleval/every_eval_ever
 
 # GitHub Actions (automated weekly)
 # See .github/workflows/scrape_and_upload.yml
@@ -70,7 +70,7 @@ data/evaluations/helm/
 
 ### Processing Configuration
 ```bash
-python scripts/simple_helm_processor_evalhub.py \
+python scripts/helm_processor.py \
   --repo-id evaleval/every_eval_ever \
   --chunk-size 25 \
   --max-workers 2 \
@@ -117,10 +117,10 @@ model_info = ModelInfo(
 ### Test Individual Processing
 ```bash
 # Process synthetic test data
-python scripts/simple_helm_processor_evalhub.py --test-run
+python scripts/helm_processor.py --test-run
 
 # Test with specific benchmarks
-python scripts/simple_helm_processor_evalhub.py --test-run \
+python scripts/helm_processor.py --test-run \
   --test-benchmarks mmlu hellaswag boolq \
   --num-files-test 5
 ```
@@ -171,7 +171,7 @@ The workflow currently runs but requires HELM data collection implementation:
 
 - name: Run HELM Processing
   run: |
-    python scripts/simple_helm_processor_evalhub.py \
+    python scripts/helm_processor.py \
       --repo-id "${HF_REPO_ID}" \
       --chunk-size 25 \
       --max-workers 2 \
@@ -250,7 +250,7 @@ git clone https://github.com/evaleval/evalHub.git external_schemas/evalHub
 ### Debug Mode
 ```bash
 # Enable detailed logging
-PYTHONUNBUFFERED=1 python scripts/simple_helm_processor_evalhub.py --test-run
+PYTHONUNBUFFERED=1 python scripts/helm_processor.py --test-run
 ```
 
 ### Note on Warnings

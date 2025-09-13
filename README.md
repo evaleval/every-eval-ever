@@ -12,10 +12,10 @@ pip install -r requirements.txt
 ./setup_schemas.sh
 
 # Test processing
-python scripts/simple_helm_processor_evalhub.py --test-run
+python scripts/helm_processor.py --test-run
 
 # Full processing (requires HF_TOKEN)
-python scripts/simple_helm_processor_evalhub.py --repo-id evaleval/every_eval_ever
+python scripts/helm_processor.py --repo-id evaleval/every_eval_ever
 ```
 
 ## 📊 Datasets
@@ -78,7 +78,7 @@ performance = df.groupby(['model_info.model_name', 'benchmark'])['instance_resul
 ```
 every-eval-ever/
 ├── scripts/
-│   └── simple_helm_processor_evalhub.py  # HELM processor
+│   └── helm_processor.py  # HELM processor
 ├── docs/
 │   └── HELM.md                           # HELM-specific docs
 ├── tests/                                # Test suite

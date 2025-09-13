@@ -55,7 +55,7 @@ jobs:
           
           echo "⏳ Processing will create individual JSON files..."
           
-          if python scripts/simple_helm_processor_evalhub.py \
+          if python scripts/helm_processor.py \
             --repo-id "${HF_REPO_ID}" \
             --chunk-size 25 \
             --max-workers 2 \
