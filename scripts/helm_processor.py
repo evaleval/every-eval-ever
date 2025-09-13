@@ -499,10 +499,10 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
                 ),
                 generation_args=GenerationArgs(
                     use_vllm=None,
-                    temperature=float(helm_data.get('temperature', 0.0)),
+                    temperature=float(helm_data.get('temperature', 0.0)) if helm_data.get('temperature') is not None else 0.0,
                     top_p=None,  # Not available in HELM data
                     top_k=None,  # Not available in HELM data
-                    max_tokens=helm_data.get('max_tokens'),
+                    max_tokens=helm_data.get('max_tokens') if helm_data.get('max_tokens') is not None else None,
                     stop_sequences=helm_data.get('stop_sequences', [])
                 )
             )
@@ -548,7 +548,7 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
                 parameters=None
             ),
             ground_truth=helm_data.get('ground_truth', ''),
-            score=float(helm_data.get('score', 0.0))
+            score=float(helm_data.get('score', 0.0)) if helm_data.get('score') is not None else 0.0
         )
         
         # Create the complete EvaluationResult
@@ -577,11 +577,54 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
                 return obj
         
         result_dict = convert_enums_to_strings(result_dict)
+        
+        # Clean and validate the data to prevent Arrow/datasets issues
+        result_dict = _clean_and_validate_data(result_dict)
+        
         return result_dict
         
     except Exception as e:
         logger.error(f"Failed to create EvaluationResult from HELM data: {e}")
         return None
+
+
+def _clean_and_validate_data(data):
+    """
+    Clean and validate data to prevent Arrow/datasets typecasting issues.
+    Ensures all fields have consistent types and no problematic None values.
+    """
+    if isinstance(data, dict):
+        cleaned = {}
+        for key, value in data.items():
+            if value is None:
+                # Replace None with appropriate defaults based on expected types
+                if key in ['parameters', 'revision', 'hf_path', 'use_vllm', 'top_p', 'top_k', 'cumulative_logprob']:
+                    cleaned[key] = None  # Keep None for optional fields
+                elif key in ['temperature', 'score']:
+                    cleaned[key] = 0.0  # Default numeric values
+                elif key in ['max_tokens', 'hf_index']:
+                    cleaned[key] = 0  # Default integer values
+                elif key in ['name', 'response', 'ground_truth', 'raw_input', 'language', 'schema_version', 'evaluation_id']:
+                    cleaned[key] = ""  # Default string values
+                elif key in ['stop_sequences', 'generated_tokens_logprobs']:
+                    cleaned[key] = []  # Default list values
+                elif key in ['is_instruct']:
+                    cleaned[key] = False  # Default boolean values
+                else:
+                    cleaned[key] = None  # Keep None for unknown fields
+            else:
+                cleaned[key] = _clean_and_validate_data(value)
+        return cleaned
+    elif isinstance(data, list):
+        return [_clean_and_validate_data(item) for item in data]
+    elif isinstance(data, str):
+        # Ensure strings are valid UTF-8 and not empty unless intentional
+        return data.strip() if data else ""
+    elif isinstance(data, (int, float, bool)):
+        return data
+    else:
+        # For any other type, convert to string or handle appropriately
+        return str(data) if data is not None else ""
 
 
 def _determine_prompt_class_from_benchmark(benchmark: str) -> str:
@@ -714,6 +757,10 @@ def _create_evaluation_result(row: pd.Series, task_id: str, benchmark: str, sour
                 return obj
         
         result_dict = convert_enums_to_strings(result_dict)
+        
+        # Clean and validate the data to prevent Arrow/datasets issues
+        result_dict = _clean_and_validate_data(result_dict)
+        
         return result_dict
         
     except Exception as e:
@@ -908,29 +955,227 @@ def process_chunk_with_individual_files(chunk: Dict, workers: int, source: str =
     return aggregated_file
 
 
-def get_existing_task_ids(repo_id: str) -> Set[str]:
-    """Get all existing task IDs from the repository."""
-    existing_ids = set()
+def get_existing_tasks_from_hf_repo(repo_id: str) -> Set[str]:
+    """
+    Get existing task names from HuggingFace repository using datasets library.
+    Extracts and cleans evaluation IDs to match the format of scraped HELM runs.
     
-    if not DATASETS_AVAILABLE:
-        logger.warning("⚠️ datasets library not available - cannot check existing tasks")
-        return existing_ids
+    Args:
+        repo_id: HuggingFace repository ID (e.g., 'evaleval/every_eval_ever')
+        
+    Returns:
+        Set of existing task names (cleaned from evaluation IDs)
+    """
+    existing_task_names = set()
     
     try:
-        # Try to load the dataset
-        dataset = load_dataset(repo_id, split="train", trust_remote_code=True)
-        logger.info(f"📊 Found existing dataset with {len(dataset)} records")
+        if not DATASETS_AVAILABLE:
+            logger.warning("⚠️ datasets library not available - cannot check existing data")
+            return existing_task_names
         
-        # Extract task IDs from evaluation_id field
-        for item in dataset:
-            eval_id = item.get('evaluation_id', '')
-            if eval_id:
-                existing_ids.add(eval_id)
+        logger.info(f"📚 Loading existing evaluation_ids from HF repo: {repo_id}")
         
-        logger.info(f"🔍 Found {len(existing_ids)} existing task IDs")
+        # First try to load just the evaluation_id column directly (much faster)
+        try:
+            logger.info("   💡 Attempting direct column load...")
+            dataset = load_dataset(repo_id, split="train")
+            evaluation_ids = dataset['evaluation_id']
+            logger.info(f"✅ Loaded {len(evaluation_ids)} evaluation IDs directly from column")
+            
+        except Exception as direct_error:
+            logger.warning(f"   ⚠️ Direct column load failed: {direct_error}")
+            logger.info("   💡 Falling back to streaming approach...")
+            
+            # Fallback to streaming approach
+            dataset = load_dataset(repo_id, split="train", streaming=True)
+            logger.info(f"✅ Loaded streaming dataset from {repo_id}")
+            
+            # Extract evaluation IDs from stream with error handling
+            evaluation_ids = []
+            count = 0
+            errors = 0
+        
+            for item in dataset:
+                try:
+                    eval_id = item.get('evaluation_id')
+                    if eval_id and isinstance(eval_id, str):
+                        evaluation_ids.append(eval_id)
+                    else:
+                        errors += 1
+                        if errors <= 5:  # Log first few errors
+                            logger.warning(f"   ⚠️ Invalid evaluation_id: {eval_id} (type: {type(eval_id)})")
+                    
+                    count += 1
+                    
+                    # Log progress every 25000 items
+                    if count % 25000 == 0:
+                        logger.info(f"   📊 Processed {count} items, found {len(evaluation_ids)} valid evaluation IDs, {errors} errors")
+                        
+                except Exception as item_error:
+                    errors += 1
+                    if errors <= 5:  # Log first few item errors
+                        logger.warning(f"   ⚠️ Error processing item {count}: {item_error}")
+                    continue
+            
+            logger.info(f"✅ Extracted {len(evaluation_ids)} evaluation IDs via streaming (processed {count} items, {errors} errors)")
+        
+        # Convert evaluation IDs to task names
+        logger.info(f"📊 Processing {len(evaluation_ids)} evaluation IDs to extract task names...")
+        
+        task_errors = 0
+        for eval_id in evaluation_ids:
+            try:
+                task_name = extract_task_from_evaluation_id(eval_id)
+                if task_name:
+                    existing_task_names.add(task_name)
+                else:
+                    task_errors += 1
+            except Exception as task_error:
+                task_errors += 1
+                if task_errors <= 5:  # Log first few task extraction errors
+                    logger.warning(f"   ⚠️ Error extracting task from {eval_id}: {task_error}")
+        
+        logger.info(f"✅ Found {len(existing_task_names)} unique task names from {len(evaluation_ids)} evaluation IDs ({task_errors} extraction errors)")
+        return existing_task_names
         
     except Exception as e:
-        logger.info(f"📭 No existing dataset found: {e}")
+        logger.warning(f"⚠️ Could not load existing data from HF repo {repo_id}: {e}")
+        logger.info(f"   💡 Falling back to no deduplication")
+        return existing_task_names
+
+
+def extract_task_from_evaluation_id(evaluation_id: str) -> Optional[str]:
+    """
+    Extract task identifier from evaluation_id for deduplication matching.
+    
+    Args:
+        evaluation_id: Full evaluation ID like "helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957"
+        
+    Returns:
+        Task identifier that can be matched against scraped task names
+        Example: "commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended"
+    """
+    try:
+        # Pattern: helm_{benchmark}_{full_task_name}_id{instance1}_id{instance2}
+        # Example: helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957
+        # We want to extract: commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended
+        
+        if not evaluation_id.startswith('helm_'):
+            return None
+            
+        # Remove 'helm_' prefix
+        without_prefix = evaluation_id[5:]  # Remove 'helm_'
+        
+        # Find the last occurrence of '_id' which marks the start of instance IDs
+        # Split by '_id' and take everything before the first instance ID
+        id_parts = without_prefix.split('_id')
+        if len(id_parts) < 2:
+            return None
+            
+        # The task name is everything before the first '_id'
+        task_with_benchmark = id_parts[0]
+        
+        # Now we need to separate the benchmark from the task
+        # The benchmark is the first component before the first ':'
+        # Example: "commonsense_commonsense:dataset=..." -> benchmark="commonsense", task="commonsense:dataset=..."
+        
+        if ':' in task_with_benchmark:
+            # Find the first colon to identify where the actual task parameters start
+            colon_pos = task_with_benchmark.find(':')
+            before_colon = task_with_benchmark[:colon_pos]
+            after_colon = task_with_benchmark[colon_pos:]
+            
+            # The benchmark is typically the first part before the underscore
+            # Extract everything after the first underscore and before the colon, then rejoin
+            if '_' in before_colon:
+                # Skip the first part (benchmark) and take the rest as the task name
+                parts = before_colon.split('_')
+                task_name = '_'.join(parts[1:]) + after_colon
+                return task_name
+            else:
+                # No underscore before colon, the whole thing is the task
+                return task_with_benchmark
+        else:
+            # No colon, so we need to find where the task name starts
+            # Skip the first part (benchmark) and return the rest
+            parts = task_with_benchmark.split('_')
+            if len(parts) > 1:
+                return '_'.join(parts[1:])
+            else:
+                return task_with_benchmark
+                
+    except Exception:
+        return None
+
+
+def task_name_to_evaluation_id_prefix(task_name: str, benchmark: str, source: str = "helm") -> str:
+    """
+    Generate evaluation_id prefix from task name to check for existing data.
+    
+    Args:
+        task_name: HELM task name (e.g., 'gsm:model=AlephAlpha_luminous-base')
+        benchmark: Benchmark name (e.g., 'gsm8k', 'commonsense')
+        source: Source name (default: 'helm')
+        
+    Returns:
+        Evaluation ID prefix that would be generated for this task
+        Example: "helm_gsm8k_gsm:model=AlephAlpha_luminous-base_"
+    """
+    # This matches the evaluation_id generation logic: f"{source}_{benchmark}_{task_id}_{instance_id}"
+    # We return the prefix without instance_id to match all instances of this task
+    return f"{source}_{benchmark}_{task_name}_"
+
+
+def get_existing_tasks_from_evaluation_ids(existing_evaluation_ids: Set[str]) -> Set[str]:
+    """
+    Extract all existing task names from evaluation IDs once, for efficient lookup.
+    
+    Args:
+        existing_evaluation_ids: Set of existing evaluation IDs
+        
+    Returns:
+        Set of existing task names extracted from evaluation IDs
+    """
+    existing_tasks = set()
+    for eval_id in existing_evaluation_ids:
+        extracted_task = extract_task_from_evaluation_id(eval_id)
+        if extracted_task:
+            existing_tasks.add(extracted_task)
+    
+    return existing_tasks
+
+
+def check_task_exists_in_repo(task_name: str, existing_tasks: Set[str]) -> bool:
+    """
+    Check if a task already exists in the repository using pre-computed task set.
+    
+    Args:
+        task_name: HELM task name
+        existing_tasks: Pre-computed set of existing task names
+        
+    Returns:
+        True if task already exists, False otherwise
+    """
+    return task_name in existing_tasks
+
+
+def get_existing_task_ids(downloads_dir: Path) -> Set[str]:
+    """Get all existing task IDs from local download directories."""
+    existing_ids = set()
+    
+    try:
+        if downloads_dir.exists():
+            # Get all directory names in the downloads folder
+            for item in downloads_dir.iterdir():
+                if item.is_dir():
+                    existing_ids.add(item.name)
+            
+            logger.info(f"📊 Found {len(existing_ids)} existing tasks in {downloads_dir}")
+        else:
+            logger.info(f"� Downloads directory {downloads_dir} doesn't exist - no existing tasks")
+            
+    except Exception as e:
+        logger.error(f"❌ Error checking existing downloads: {e}")
     
     return existing_ids
 
@@ -1081,6 +1326,36 @@ def main():
                             benchmark_map[task_name] = run.get('_source_benchmark', 'lite')
                     
                     task_names = [name for name in task_names if name]  # Remove empty
+                    
+                    # STEP: Deduplication - Remove tasks that already exist in HF repository
+                    logger.info(f"📊 Initial scraped tasks: {len(task_names)}")
+                    
+                    # Get existing task names directly from HF repository
+                    existing_tasks = get_existing_tasks_from_hf_repo(args.repo_id)
+                    
+                    if existing_tasks:
+                        logger.info(f"✅ Found {len(existing_tasks)} existing tasks in HF repository")
+                        
+                        # Convert scraped task names to set for efficient set operations
+                        scraped_tasks_set = set(task_names)
+                        
+                        # Find new tasks using set difference (much faster!)
+                        new_tasks_set = scraped_tasks_set - existing_tasks
+                        skipped_tasks_set = scraped_tasks_set & existing_tasks
+                        
+                        # Convert back to list maintaining original order for processing
+                        task_names = [task for task in task_names if task in new_tasks_set]
+                        
+                        logger.info(f"⏭️ Skipping {len(skipped_tasks_set)} tasks that already exist in repository")
+                        logger.info(f"📝 Will process {len(task_names)} new tasks")
+                        
+                        if skipped_tasks_set and len(skipped_tasks_set) <= 10:
+                            logger.info(f"📋 Skipped tasks: {', '.join(list(skipped_tasks_set)[:10])}")
+                        elif len(skipped_tasks_set) > 10:
+                            logger.info(f"📋 Skipped tasks (first 10): {', '.join(list(skipped_tasks_set)[:10])}...")
+                    else:
+                        logger.info(f"📝 No existing tasks found - will process all {len(task_names)} tasks")
+                    
                     logger.info(f"📝 Prepared {len(task_names)} tasks for streaming processing")
                 else:
                     logger.warning("⚠️ No HELM runs scraped - using existing data if available")
