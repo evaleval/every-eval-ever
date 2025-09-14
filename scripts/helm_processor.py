@@ -955,7 +955,156 @@ def process_chunk_with_individual_files(chunk: Dict, workers: int, source: str =
     return aggregated_file
 
 
+def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
+    """
+    Get existing task names from a manifest file in the HuggingFace repository.
+    This is much faster than scanning individual files or loading the entire dataset.
+    
+    Args:
+        repo_id: HuggingFace repository ID (e.g., 'evaleval/every_eval_ever')
+        
+    Returns:
+        Set of existing task names from the manifest
+    """
+    existing_tasks = set()
+    
+    try:
+        from huggingface_hub import hf_hub_download
+        
+        # Try to download the manifest file
+        manifest_path = hf_hub_download(
+            repo_id=repo_id,
+            filename="data/helm/task_manifest.json",
+            repo_type="dataset",
+            local_files_only=False
+        )
+        
+        # Load the manifest
+        import json
+        with open(manifest_path, 'r') as f:
+            manifest_data = json.load(f)
+        
+        # Extract task names from manifest
+        task_list = manifest_data.get('uploaded_tasks', [])
+        existing_tasks = set(task_list)
+        
+        logger.info(f"📋 Loaded {len(existing_tasks)} existing tasks from manifest (ultra-fast!)")
+        return existing_tasks
+        
+    except Exception as e:
+        logger.info(f"📄 No manifest found or error loading: {e}")
+        logger.info("   💡 Falling back to dataset-based deduplication...")
+        # Fall back to the original method
+        return get_existing_tasks_from_hf_repo_legacy(repo_id)
+
+
 def get_existing_tasks_from_hf_repo(repo_id: str) -> Set[str]:
+    """
+    Get existing task names using the fastest available method:
+    1. Try manifest file first (ultra-fast)
+    2. Fall back to dataset scanning if no manifest
+    """
+    return get_existing_tasks_from_manifest(repo_id)
+
+
+def update_task_manifest(repo_id: str, new_task_name: str):
+    """
+    Thread-safe manifest update by collecting tasks and deferring batch updates.
+    Each thread adds to a shared list, main thread updates manifest periodically.
+    
+    Args:
+        repo_id: HuggingFace repository ID
+        new_task_name: Name of the newly uploaded task
+    """
+    # For thread safety, we'll collect tasks and update in batches from main thread
+    # This function now just logs - actual update happens in batch at the end
+    logger.debug(f"📋 Task marked for manifest update: {new_task_name}")
+
+
+def update_task_manifest_batch(repo_id: str, completed_task_names: List[str]):
+    """
+    Update the task manifest file with multiple completed tasks at once.
+    This should be called from the main thread after parallel processing completes.
+    
+    Args:
+        repo_id: HuggingFace repository ID
+        completed_task_names: List of successfully uploaded task names
+    """
+    if not completed_task_names:
+        logger.info("📋 No new tasks to add to manifest")
+        return
+        
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        
+        logger.info(f"📋 Updating manifest with {len(completed_task_names)} completed tasks...")
+        
+        # Try to download existing manifest
+        try:
+            from huggingface_hub import hf_hub_download
+            manifest_path = hf_hub_download(
+                repo_id=repo_id,
+                filename="data/helm/task_manifest.json", 
+                repo_type="dataset",
+                local_files_only=False
+            )
+            
+            # Load existing manifest
+            import json
+            with open(manifest_path, 'r') as f:
+                manifest_data = json.load(f)
+            logger.info(f"📋 Loaded existing manifest with {len(manifest_data.get('uploaded_tasks', []))} tasks")
+                
+        except Exception as e:
+            logger.info(f"📋 Creating new manifest (no existing manifest found): {e}")
+            # Create new manifest if none exists
+            manifest_data = {
+                "version": "1.0",
+                "description": "Manifest of uploaded HELM tasks for fast deduplication",
+                "created": datetime.now(timezone.utc).isoformat(),
+                "uploaded_tasks": []
+            }
+        
+        # Add new tasks (avoid duplicates using set operations)
+        existing_tasks = set(manifest_data.get('uploaded_tasks', []))
+        new_tasks = set(completed_task_names)
+        all_tasks = existing_tasks | new_tasks
+        actually_new_tasks = new_tasks - existing_tasks
+        
+        manifest_data['uploaded_tasks'] = sorted(list(all_tasks))  # Keep sorted for consistency
+        manifest_data['last_updated'] = datetime.now(timezone.utc).isoformat()
+        manifest_data['total_tasks'] = len(all_tasks)
+        
+        # Save updated manifest locally
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(manifest_data, f, indent=2)
+            temp_manifest_path = f.name
+        
+        # Upload updated manifest
+        api.upload_file(
+            path_or_fileobj=temp_manifest_path,
+            path_in_repo="data/helm/task_manifest.json",
+            repo_id=repo_id,
+            repo_type="dataset"
+        )
+        
+        # Clean up temp file
+        import os
+        os.unlink(temp_manifest_path)
+        
+        logger.info(f"✅ Successfully updated manifest:")
+        logger.info(f"   � Added {len(actually_new_tasks)} new tasks")
+        logger.info(f"   📊 Total tasks in manifest: {len(all_tasks)}")
+        
+    except Exception as e:
+        # Don't fail the entire process if manifest update fails
+        logger.warning(f"⚠️ Could not update task manifest: {e}")
+        logger.warning(f"   📝 Tasks will still be uploaded, but deduplication may be slower on next run")
+
+
+def get_existing_tasks_from_hf_repo_legacy(repo_id: str) -> Set[str]:
     """
     Get existing task names from HuggingFace repository using datasets library.
     Extracts and cleans evaluation IDs to match the format of scraped HELM runs.
@@ -1484,42 +1633,36 @@ def main():
                             
                             for attempt in range(max_retries):
                                 try:
-                                    # Step 1: Upload to temporary path first (atomic upload simulation)
-                                    temp_repo_path = f"data/.uploading/{nested_path}/{task_file.name}"
+                                    # Step 1: Verify local file integrity before upload
+                                    if not task_file.exists() or task_file.stat().st_size == 0:
+                                        raise ValueError(f"Local file {task_file} is missing or empty")
+                                    
+                                    # Step 2: Direct upload to final location
                                     api.upload_file(
                                         path_or_fileobj=str(task_file),
-                                        path_in_repo=temp_repo_path,
+                                        path_in_repo=repo_path,
                                         repo_id=args.repo_id,
                                         repo_type="dataset"
                                     )
                                     
-                                    # Step 2: Verify upload by checking file exists
+                                    # Step 3: Verify upload by checking file exists and has content
                                     try:
                                         from huggingface_hub import hf_hub_download
-                                        hf_hub_download(
+                                        downloaded_path = hf_hub_download(
                                             repo_id=args.repo_id,
-                                            filename=temp_repo_path,
+                                            filename=repo_path,
                                             repo_type="dataset",
                                             local_files_only=False
                                         )
                                         
-                                        # Step 3: Move from temp to final location (atomic move)
-                                        api.copy_file(
-                                            src_path_in_repo=temp_repo_path,
-                                            dest_path_in_repo=repo_path,
-                                            repo_id=args.repo_id,
-                                            repo_type="dataset"
-                                        )
-                                        
-                                        # Step 4: Clean up temp file
-                                        api.delete_file(
-                                            path_in_repo=temp_repo_path,
-                                            repo_id=args.repo_id,
-                                            repo_type="dataset"
-                                        )
+                                        # Verify the downloaded file has reasonable size
+                                        import os
+                                        if os.path.getsize(downloaded_path) < 100:  # Minimum reasonable size
+                                            raise ValueError(f"Uploaded file appears incomplete (size: {os.path.getsize(downloaded_path)} bytes)")
                                         
                                         upload_success = True
                                         logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path} (attempt {attempt + 1})")
+                                        
                                         break
                                         
                                     except Exception as verify_error:
@@ -1587,44 +1730,18 @@ def main():
                 logger.info(f"🚀 Starting parallel processing with {args.max_workers} threads")
                 logger.info(f"📊 Total tasks to process: {len(task_list)}")
                 
-                # Create progress checkpoint file
-                checkpoint_file = Path("data") / "processing_checkpoint.json"
-                checkpoint_file.parent.mkdir(exist_ok=True)
-                
-                def save_checkpoint(completed_tasks, failed_tasks):
-                    """Save processing progress to allow resume on failure"""
-                    checkpoint_data = {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "completed_tasks": completed_tasks,
-                        "failed_tasks": failed_tasks,
-                        "total_tasks": len(task_list)
-                    }
-                    with open(checkpoint_file, 'w') as f:
-                        json.dump(checkpoint_data, f, indent=2)
-                
-                # Load existing checkpoint if exists
-                completed_tasks = []
-                if checkpoint_file.exists():
-                    try:
-                        with open(checkpoint_file, 'r') as f:
-                            checkpoint_data = json.load(f)
-                            completed_tasks = checkpoint_data.get("completed_tasks", [])
-                            logger.info(f"📋 Resuming from checkpoint: {len(completed_tasks)} tasks already completed")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Could not load checkpoint: {e}")
-                
-                # Filter out already completed tasks
-                remaining_tasks = [task for task in task_list if task[0] not in completed_tasks]
-                logger.info(f"📝 Processing {len(remaining_tasks)} remaining tasks")
+                # Note: No local checkpoint needed! HF repository deduplication handles resume automatically
+                # Even if runner restarts, get_existing_tasks_from_hf_repo() ensures we skip already uploaded tasks
                 
                 # Process tasks in parallel with configurable thread count
                 with ThreadPoolExecutor(max_workers=args.max_workers, thread_name_prefix="TaskWorker") as executor:
-                    # Submit remaining tasks
-                    future_to_task = {executor.submit(process_single_task, task_info): task_info for task_info in remaining_tasks}
+                    # Submit all tasks (deduplication already handled above)
+                    future_to_task = {executor.submit(process_single_task, task_info): task_info for task_info in task_list}
                     
-                    completed_count = len(completed_tasks)  # Start from checkpoint
+                    completed_count = 0
                     failed_count = 0
                     failed_tasks = []
+                    completed_tasks = []  # Track successfully completed task names for manifest
                     
                     # Process completed tasks
                     for future in as_completed(future_to_task):
@@ -1635,10 +1752,7 @@ def main():
                             success = future.result()
                             if success:
                                 completed_count += 1
-                                completed_tasks.append(task_name)
-                                # Save checkpoint every 10 successful tasks
-                                if completed_count % 10 == 0:
-                                    save_checkpoint(completed_tasks, failed_tasks)
+                                completed_tasks.append(task_name)  # Add to completed list for manifest
                             else:
                                 failed_count += 1
                                 failed_tasks.append(task_name)
@@ -1652,25 +1766,11 @@ def main():
                             failed_count += 1
                             failed_tasks.append(task_name)
                             logger.error(f"❌ Task {task_index} ({task_name}) failed with exception: {e}")
-                    
-                # Final checkpoint save
-                save_checkpoint(completed_tasks, failed_tasks)
-                logger.info(f"💾 Final checkpoint saved with {len(completed_tasks)} completed tasks")
                 
-                # Create upload manifest for verification
-                manifest_file = Path("data") / "upload_manifest.json"
-                manifest_data = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "total_tasks": len(task_list),
-                    "completed_tasks": len(completed_tasks),
-                    "failed_tasks": len(failed_tasks),
-                    "completed_task_list": completed_tasks,
-                    "failed_task_list": failed_tasks,
-                    "repo_id": args.repo_id
-                }
-                with open(manifest_file, 'w') as f:
-                    json.dump(manifest_data, f, indent=2)
-                logger.info(f"📋 Upload manifest saved to {manifest_file}")
+                # Update manifest with all completed tasks (thread-safe batch operation)
+                if completed_tasks and not args.local_only:
+                    logger.info(f"📋 Updating task manifest with {len(completed_tasks)} completed tasks...")
+                    update_task_manifest_batch(args.repo_id, completed_tasks)
                 
                 logger.info(f"🎉 Individual task streaming completed!")
                 logger.info(f"   📊 Total processed: {total_processed} evaluations")
