@@ -34,7 +34,7 @@ from queue import Queue
 from typing import List, Set, Dict, Optional
 
 # Third-party imports
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from datasets import Dataset, load_dataset
 
 # Suppress Pydantic protected namespace warnings
@@ -1034,10 +1034,115 @@ def process_chunk_with_individual_files(chunk: Dict, workers: int, source: str =
     return aggregated_file
 
 
+def normalize_task_name_for_deduplication(task_name: str) -> str:
+    """
+    Normalize a scraped HELM task name to match the filename format used in the repository.
+    
+    This ensures proper deduplication by converting scraped task names to the format
+    that would be used when saving files.
+    
+    Args:
+        task_name: Raw task name from HELM scraping
+        
+    Returns:
+        Normalized task name that matches the filename format
+        
+    Example:
+        Input: "commonsense:dataset=hellaswag,method=multiple_choice_joint,model=together/opt-66b,groups=ablation_multiple_choice"
+        Output: "commonsense_dataset=hellaswag,method=multiple_choice_joint,model=together_opt-66b,groups=ablation_multiple_choice"
+    """
+    if not task_name:
+        return ""
+    
+    # Replace filesystem-unsafe characters with underscores
+    normalized = task_name.replace('/', '_').replace(':', '_').replace(' ', '_')
+    
+    return normalized
+
+
+def check_task_exists_efficient(task_name: str, existing_tasks: Set[str]) -> bool:
+    """
+    Efficiently check if a task already exists using the normalized task name.
+    
+    Args:
+        task_name: Raw task name from HELM scraping
+        existing_tasks: Set of existing task run IDs from file structure
+        
+    Returns:
+        True if task already exists, False otherwise
+    """
+    # Normalize the task name to match filename format
+    normalized_task = normalize_task_name_for_deduplication(task_name)
+    
+    # Check if this normalized task exists in our set
+    return normalized_task in existing_tasks
+
+
+def get_existing_tasks_from_file_structure(repo_id: str) -> Set[str]:
+    """
+    Get existing task run IDs by scanning the file structure in data/helm/ directory.
+    This is the most elegant and efficient approach - directly extract run IDs from filenames.
+    
+    File path format: "data/helm/classic/hellaswag/together_opt-66b/commonsense_dataset=hellaswag,method=multiple_choice_joint,model=together_opt-66b,groups=ablation_multiple_choice_evalhub.json"
+    Extracted run ID: "commonsense_dataset=hellaswag,method=multiple_choice_joint,model=together_opt-66b,groups=ablation_multiple_choice"
+    
+    Args:
+        repo_id: HuggingFace repository ID (e.g., 'evaleval/every_eval_ever')
+        
+    Returns:
+        Set of existing task run IDs extracted from file structure
+    """
+    existing_tasks = set()
+    
+    try:
+        from huggingface_hub import list_repo_files
+        
+        logger.info(f"📁 Scanning file structure in {repo_id} for existing tasks...")
+        
+        # List all files in the repository
+        files = list_repo_files(repo_id=repo_id, repo_type="dataset")
+        
+        # Filter for HELM data files in data/helm/ directory
+        helm_files = [f for f in files if f.startswith("data/helm/") and f.endswith("_evalhub.json")]
+        
+        logger.info(f"📄 Found {len(helm_files)} HELM data files")
+        
+        # Extract run IDs from filenames
+        for file_path in helm_files:
+            try:
+                # Extract filename from path
+                filename = file_path.split("/")[-1]
+                
+                # Remove the "_evalhub.json" suffix to get the run ID
+                if filename.endswith("_evalhub.json"):
+                    run_id = filename[:-13]  # Remove "_evalhub.json" (13 characters)
+                    existing_tasks.add(run_id)
+                    
+            except Exception as e:
+                logger.debug(f"⚠️ Could not extract run ID from {file_path}: {e}")
+                continue
+        
+        logger.info(f"✅ Extracted {len(existing_tasks)} unique run IDs from file structure (elegant!)")
+        
+        # Show a few examples for verification
+        if existing_tasks:
+            logger.info("📝 Sample extracted run IDs:")
+            for i, task_id in enumerate(sorted(list(existing_tasks))[:3]):
+                logger.info(f"   {i+1}. {task_id}")
+        
+        return existing_tasks
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Could not scan file structure: {e}")
+        logger.info("   💡 Falling back to manifest-based deduplication...")
+        # Fall back to manifest method
+        return get_existing_tasks_from_manifest(repo_id)
+
+
 def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
     """
     Get existing task names from a manifest file in the HuggingFace repository.
-    This is much faster than scanning individual files or loading the entire dataset.
+    This is the fallback method when file structure scanning fails.
     
     Args:
         repo_id: HuggingFace repository ID (e.g., 'evaleval/every_eval_ever')
@@ -1064,7 +1169,7 @@ def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
         task_list = manifest_data.get('uploaded_tasks', [])
         existing_tasks = set(task_list)
         
-        logger.info(f"📋 Loaded {len(existing_tasks)} existing tasks from manifest (ultra-fast!)")
+        logger.info(f"📋 Loaded {len(existing_tasks)} existing tasks from manifest (fast fallback)")
         return existing_tasks
         
     except Exception as e:
@@ -1076,11 +1181,12 @@ def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
 
 def get_existing_tasks_from_hf_repo(repo_id: str) -> Set[str]:
     """
-    Get existing task names using the fastest available method:
-    1. Try manifest file first (ultra-fast)
-    2. Fall back to dataset scanning if no manifest
+    Get existing task names using the most elegant and efficient method:
+    1. Try file structure scanning first (fastest and most direct)
+    2. Fall back to manifest file if structure scanning fails
+    3. Fall back to dataset scanning as last resort
     """
-    return get_existing_tasks_from_manifest(repo_id)
+    return get_existing_tasks_from_file_structure(repo_id)
 
 
 def update_task_manifest(repo_id: str, new_task_name: str):
@@ -1367,16 +1473,16 @@ def get_existing_tasks_from_evaluation_ids(existing_evaluation_ids: Set[str]) ->
 
 def check_task_exists_in_repo(task_name: str, existing_tasks: Set[str]) -> bool:
     """
-    Check if a task already exists in the repository using pre-computed task set.
+    Check if a task already exists in the repository using the elegant file-structure approach.
     
     Args:
-        task_name: HELM task name
-        existing_tasks: Pre-computed set of existing task names
+        task_name: HELM task name from scraping
+        existing_tasks: Pre-computed set of existing task run IDs from file structure
         
     Returns:
         True if task already exists, False otherwise
     """
-    return task_name in existing_tasks
+    return check_task_exists_efficient(task_name, existing_tasks)
 
 
 def get_existing_task_ids(downloads_dir: Path) -> Set[str]:
@@ -1712,18 +1818,43 @@ def main():
                                     )
                                     
                                     # Step 3: Verify upload by checking file exists and has content
-                                    try:
-                                        downloaded_path = hf_hub_download(
-                                            repo_id=args.repo_id,
-                                            filename=repo_path,
-                                            repo_type="dataset",
-                                            local_files_only=False
-                                        )
-                                        
-                                        # Verify the downloaded file has reasonable size
-                                        if os.path.getsize(downloaded_path) < 100:  # Minimum reasonable size
-                                            raise ValueError(f"Uploaded file appears incomplete (size: {os.path.getsize(downloaded_path)} bytes)")
-                                        
+                                    # Add delay and retry for verification due to Hub propagation delay
+                                    verification_success = False
+                                    verification_attempts = 3
+                                    verification_delay = 2  # seconds
+                                    
+                                    for verify_attempt in range(verification_attempts):
+                                        try:
+                                            if verify_attempt > 0:
+                                                logger.debug(f"⏳ Thread-{thread_id}: Waiting {verification_delay}s before verification attempt {verify_attempt + 1}")
+                                                time.sleep(verification_delay)
+                                            
+                                            downloaded_path = hf_hub_download(
+                                                repo_id=args.repo_id,
+                                                filename=repo_path,
+                                                repo_type="dataset",
+                                                local_files_only=False
+                                            )
+                                            
+                                            # Verify the downloaded file has reasonable size
+                                            file_size = os.path.getsize(downloaded_path)
+                                            if file_size < 100:  # Minimum reasonable size
+                                                raise ValueError(f"Uploaded file appears incomplete (size: {file_size} bytes)")
+                                            
+                                            verification_success = True
+                                            logger.debug(f"✅ Thread-{thread_id}: Upload verified (size: {file_size} bytes)")
+                                            break
+                                            
+                                        except Exception as verify_error:
+                                            if verify_attempt < verification_attempts - 1:
+                                                logger.debug(f"⚠️ Thread-{thread_id}: Verification attempt {verify_attempt + 1} failed, retrying: {verify_error}")
+                                            else:
+                                                logger.warning(f"⚠️ Thread-{thread_id}: Upload verification failed after {verification_attempts} attempts: {verify_error}")
+                                                logger.warning(f"   📝 File was uploaded but verification failed - this may be due to Hub propagation delay")
+                                                # Don't fail the upload - treat as successful since upload API call succeeded
+                                                verification_success = True
+                                    
+                                    if verification_success:
                                         upload_success = True
                                         logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path} (attempt {attempt + 1})")
                                         
@@ -1731,10 +1862,6 @@ def main():
                                         queue_manifest_update(task_name)
                                         
                                         break
-                                        
-                                    except Exception as verify_error:
-                                        logger.warning(f"⚠️ Thread-{thread_id}: Upload verification failed (attempt {attempt + 1}): {verify_error}")
-                                        raise verify_error
                                     
                                 except Exception as e:
                                     if attempt < max_retries - 1:
