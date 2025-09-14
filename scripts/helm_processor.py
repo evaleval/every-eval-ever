@@ -892,7 +892,7 @@ def aggregate_individual_files_to_hf_dataset(individual_files: List[str], chunk_
     # Save as JSON for upload
     agg_dir = Path("data/aggregated")
     agg_dir.mkdir(parents=True, exist_ok=True)
-    output_file = agg_dir / f"chunk_{chunk_id:04d}_evalhub.json"
+    output_file = agg_dir / f"chunk_{chunk_id:04d}_evalhub.jsonl"
     
     dataset.to_json(str(output_file))
     
@@ -1005,7 +1005,7 @@ def get_existing_tasks_from_file_structure(repo_id: str) -> Set[str]:
     Get existing task run IDs by scanning the file structure in data/helm/ directory.
     This is the most elegant and efficient approach - directly extract run IDs from filenames.
     
-    File path format: "data/helm/classic/hellaswag/together_opt-66b/commonsense_dataset=hellaswag,method=multiple_choice_joint,model=together_opt-66b,groups=ablation_multiple_choice_evalhub.json"
+    File path format: "data/helm/classic/hellaswag/together_opt-66b/commonsense_dataset=hellaswag,method=multiple_choice_joint,model=together_opt-66b,groups=ablation_multiple_choice_evalhub.jsonl"
     Extracted run ID: "commonsense_dataset=hellaswag,method=multiple_choice_joint,model=together_opt-66b,groups=ablation_multiple_choice"
     
     Args:
@@ -1025,7 +1025,7 @@ def get_existing_tasks_from_file_structure(repo_id: str) -> Set[str]:
         files = list_repo_files(repo_id=repo_id, repo_type="dataset")
         
         # Filter for HELM data files in data/helm/ directory
-        helm_files = [f for f in files if f.startswith("data/helm/") and f.endswith("_evalhub.json")]
+        helm_files = [f for f in files if f.startswith("data/helm/") and (f.endswith("_evalhub.json") or f.endswith("_evalhub.jsonl"))]
         
         logger.info(f"📄 Found {len(helm_files)} HELM data files")
         
@@ -1035,9 +1035,11 @@ def get_existing_tasks_from_file_structure(repo_id: str) -> Set[str]:
                 # Extract filename from path
                 filename = file_path.split("/")[-1]
                 
-                # Remove the "_evalhub.json" suffix to get the run ID
+                # Remove the "_evalhub.json" or "_evalhub.jsonl" suffix to get the run ID
                 if filename.endswith("_evalhub.json"):
                     run_id = filename[:-13]  # Remove "_evalhub.json" (13 characters)
+                elif filename.endswith("_evalhub.jsonl"):
+                    run_id = filename[:-14]  # Remove "_evalhub.jsonl" (14 characters)
                     existing_tasks.add(run_id)
                     
             except Exception as e:
@@ -1637,7 +1639,7 @@ def main():
                         # Save locally with nested structure
                         local_nested_dir = Path("data/aggregated") / nested_path
                         local_nested_dir.mkdir(parents=True, exist_ok=True)
-                        task_file = local_nested_dir / f"{task_name.replace('/', '_').replace(':', '_')}_evalhub.json"
+                        task_file = local_nested_dir / f"{task_name.replace('/', '_').replace(':', '_')}_evalhub.jsonl"
                         task_dataset.to_json(str(task_file))
                         
                         upload_success = False
