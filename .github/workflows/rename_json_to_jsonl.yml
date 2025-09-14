@@ -2,6 +2,15 @@ name: One-time JSON to JSONL Rename
 
 on:
   workflow_dispatch:  # Manual trigger only
+    inputs:
+      dry_run:
+        description: 'Run in dry-run mode (no actual changes)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+        - 'true'
+        - 'false'
 
 jobs:
   rename-files:
@@ -10,89 +19,28 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        fetch-depth: 0
+        python-version: '3.11'
     
-    - name: Configure Git
+    - name: Install dependencies
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
+        pip install huggingface-hub
     
-    - name: Find and rename JSON files to JSONL
+    - name: Run JSON to JSONL rename script
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
-        echo "🔍 Finding JSON files to rename..."
-        
-        # Find all .json files and count them
-        json_count=$(find . -name "*.json" -not -path "./.git/*" | wc -l)
-        echo "📊 Found $json_count JSON files to rename"
-        
-        if [ $json_count -eq 0 ]; then
-          echo "✅ No JSON files found to rename"
-          exit 0
+        echo "🚀 Starting JSON to JSONL rename operation..."
+        if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          echo "🔍 Running in DRY-RUN mode..."
+          python scripts/rename_json_to_jsonl.py --repo-id evaleval/every_eval_ever --dry-run
+        else
+          echo "⚡ Running in LIVE mode..."
+          python scripts/rename_json_to_jsonl.py --repo-id evaleval/every_eval_ever
         fi
-        
-        # Create a list of files to rename
-        find . -name "*.json" -not -path "./.git/*" > files_to_rename.txt
-        
-        echo "📝 Files to rename:"
-        head -10 files_to_rename.txt
-        if [ $json_count -gt 10 ]; then
-          echo "... and $(($json_count - 10)) more files"
-        fi
-        
-        # Rename files in batches to avoid overwhelming git
-        batch_size=100
-        batch_num=1
-        
-        while IFS= read -r json_file; do
-          if [ -f "$json_file" ]; then
-            # Get the directory and filename without extension
-            dir=$(dirname "$json_file")
-            filename=$(basename "$json_file" .json)
-            jsonl_file="$dir/$filename.jsonl"
-            
-            # Rename the file
-            git mv "$json_file" "$jsonl_file"
-            echo "✅ Renamed: $json_file -> $jsonl_file"
-          fi
-          
-          # Commit in batches to avoid huge commits
-          if [ $((batch_num % batch_size)) -eq 0 ]; then
-            echo "💾 Committing batch $((batch_num / batch_size))..."
-            git add -A
-            git commit -m "Batch rename JSON to JSONL (files $((batch_num - batch_size + 1))-$batch_num)"
-          fi
-          
-          batch_num=$((batch_num + 1))
-        done < files_to_rename.txt
-        
-        # Commit any remaining files
-        if [ $(git diff --cached --name-only | wc -l) -gt 0 ]; then
-          echo "💾 Committing final batch..."
-          git add -A
-          git commit -m "Final batch rename JSON to JSONL (remaining files)"
-        fi
-        
-        echo "🎉 All JSON files renamed to JSONL!"
-        
-        # Cleanup
-        rm -f files_to_rename.txt
-    
-    - name: Verify rename operation
-      run: |
-        echo "🔍 Verification after rename:"
-        echo "📊 Remaining JSON files: $(find . -name "*.json" -not -path "./.git/*" | wc -l)"
-        echo "📊 New JSONL files: $(find . -name "*.jsonl" -not -path "./.git/*" | wc -l)"
-        
-        echo "📁 Sample of new JSONL files:"
-        find . -name "*.jsonl" -not -path "./.git/*" | head -5
-    
-    - name: Push changes
-      run: |
-        echo "🚀 Pushing changes to repository..."
-        git push origin main
-        echo "✅ Successfully pushed all renamed files!"
     
     - name: Summary
       run: |
