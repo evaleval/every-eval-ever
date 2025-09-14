@@ -21,6 +21,8 @@ import shutil
 import sys
 import time
 import warnings
+import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +72,84 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+# Global manifest update queue and worker
+manifest_queue = queue.Queue()
+manifest_worker_thread = None
+manifest_worker_active = False
+
+
+def start_manifest_worker(repo_id: str):
+    """
+    Start a dedicated background thread to handle manifest updates.
+    This ensures thread-safe manifest updates without blocking task uploads.
+    """
+    global manifest_worker_thread, manifest_worker_active
+    
+    if manifest_worker_active:
+        return  # Already running
+    
+    manifest_worker_active = True
+    
+    def manifest_worker():
+        """Background worker that processes manifest updates from queue"""
+        while manifest_worker_active:
+            try:
+                # Wait for new task or timeout
+                task_name = manifest_queue.get(timeout=5.0)
+                if task_name is None:  # Shutdown signal
+                    break
+                
+                # Batch collect tasks that arrive quickly (within 2 seconds)
+                tasks_to_add = [task_name]
+                batch_deadline = time.time() + 2.0
+                
+                while time.time() < batch_deadline:
+                    try:
+                        additional_task = manifest_queue.get(timeout=0.5)
+                        if additional_task is None:  # Shutdown signal
+                            manifest_worker_active = False
+                            break
+                        tasks_to_add.append(additional_task)
+                    except queue.Empty:
+                        break
+                
+                # Update manifest with collected tasks
+                if tasks_to_add:
+                    update_task_manifest_batch(repo_id, tasks_to_add)
+                    
+            except queue.Empty:
+                continue  # Timeout, keep running
+            except Exception as e:
+                logger.warning(f"⚠️ Manifest worker error: {e}")
+    
+    manifest_worker_thread = threading.Thread(target=manifest_worker, daemon=True)
+    manifest_worker_thread.start()
+    logger.info("📋 Started manifest update worker thread")
+
+
+def stop_manifest_worker():
+    """Stop the manifest worker thread gracefully"""
+    global manifest_worker_active
+    
+    if manifest_worker_active:
+        manifest_worker_active = False
+        manifest_queue.put(None)  # Shutdown signal
+        if manifest_worker_thread:
+            manifest_worker_thread.join(timeout=10.0)
+        logger.info("📋 Stopped manifest update worker thread")
+
+
+def queue_manifest_update(task_name: str):
+    """
+    Queue a task name for manifest update.
+    This is thread-safe and non-blocking.
+    """
+    try:
+        manifest_queue.put(task_name, timeout=1.0)
+        logger.debug(f"📋 Queued manifest update for: {task_name}")
+    except queue.Full:
+        logger.warning(f"⚠️ Manifest queue full, skipping update for: {task_name}")
 
 
 def _extract_model_family(model_name: str) -> str:
@@ -1663,6 +1743,9 @@ def main():
                                         upload_success = True
                                         logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path} (attempt {attempt + 1})")
                                         
+                                        # Queue manifest update immediately (thread-safe)
+                                        queue_manifest_update(task_name)
+                                        
                                         break
                                         
                                     except Exception as verify_error:
@@ -1730,6 +1813,10 @@ def main():
                 logger.info(f"🚀 Starting parallel processing with {args.max_workers} threads")
                 logger.info(f"📊 Total tasks to process: {len(task_list)}")
                 
+                # Start manifest update worker for immediate updates
+                if not args.local_only:
+                    start_manifest_worker(args.repo_id)
+                
                 # Note: No local checkpoint needed! HF repository deduplication handles resume automatically
                 # Even if runner restarts, get_existing_tasks_from_hf_repo() ensures we skip already uploaded tasks
                 
@@ -1767,10 +1854,10 @@ def main():
                             failed_tasks.append(task_name)
                             logger.error(f"❌ Task {task_index} ({task_name}) failed with exception: {e}")
                 
-                # Update manifest with all completed tasks (thread-safe batch operation)
-                if completed_tasks and not args.local_only:
-                    logger.info(f"📋 Updating task manifest with {len(completed_tasks)} completed tasks...")
-                    update_task_manifest_batch(args.repo_id, completed_tasks)
+                # Stop manifest worker and wait for any pending updates
+                if not args.local_only:
+                    logger.info("📋 Waiting for manifest updates to complete...")
+                    stop_manifest_worker()
                 
                 logger.info(f"🎉 Individual task streaming completed!")
                 logger.info(f"   📊 Total processed: {total_processed} evaluations")
