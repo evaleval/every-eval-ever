@@ -19,11 +19,9 @@ import json
 import logging
 import os
 import pandas as pd
-import queue
 import re
 import shutil
 import sys
-import tempfile
 import threading
 import time
 import warnings
@@ -74,83 +72,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-# Global manifest update queue and worker
-manifest_queue = queue.Queue()
-manifest_worker_thread = None
-manifest_worker_active = False
-
-
-def start_manifest_worker(repo_id: str):
-    """
-    Start a dedicated background thread to handle manifest updates.
-    This ensures thread-safe manifest updates without blocking task uploads.
-    """
-    global manifest_worker_thread, manifest_worker_active
-    
-    if manifest_worker_active:
-        return  # Already running
-    
-    manifest_worker_active = True
-    
-    def manifest_worker():
-        """Background worker that processes manifest updates from queue"""
-        while manifest_worker_active:
-            try:
-                # Wait for new task or timeout
-                task_name = manifest_queue.get(timeout=5.0)
-                if task_name is None:  # Shutdown signal
-                    break
-                
-                # Batch collect tasks that arrive quickly (within 2 seconds)
-                tasks_to_add = [task_name]
-                batch_deadline = time.time() + 2.0
-                
-                while time.time() < batch_deadline:
-                    try:
-                        additional_task = manifest_queue.get(timeout=0.5)
-                        if additional_task is None:  # Shutdown signal
-                            manifest_worker_active = False
-                            break
-                        tasks_to_add.append(additional_task)
-                    except queue.Empty:
-                        break
-                
-                # Update manifest with collected tasks
-                if tasks_to_add:
-                    update_task_manifest_batch(repo_id, tasks_to_add)
-                    
-            except queue.Empty:
-                continue  # Timeout, keep running
-            except Exception as e:
-                logger.warning(f"⚠️ Manifest worker error: {e}")
-    
-    manifest_worker_thread = threading.Thread(target=manifest_worker, daemon=True)
-    manifest_worker_thread.start()
-    logger.info("📋 Started manifest update worker thread")
-
-
-def stop_manifest_worker():
-    """Stop the manifest worker thread gracefully"""
-    global manifest_worker_active
-    
-    if manifest_worker_active:
-        manifest_worker_active = False
-        manifest_queue.put(None)  # Shutdown signal
-        if manifest_worker_thread:
-            manifest_worker_thread.join(timeout=10.0)
-        logger.info("📋 Stopped manifest update worker thread")
-
-
-def queue_manifest_update(task_name: str):
-    """
-    Queue a task name for manifest update.
-    This is thread-safe and non-blocking.
-    """
-    try:
-        manifest_queue.put(task_name, timeout=1.0)
-        logger.debug(f"📋 Queued manifest update for: {task_name}")
-    except queue.Full:
-        logger.warning(f"⚠️ Manifest queue full, skipping update for: {task_name}")
+# Manifest functionality removed - using direct file structure scanning for deduplication
 
 
 def _extract_model_family(model_name: str) -> str:
@@ -1134,49 +1056,11 @@ def get_existing_tasks_from_file_structure(repo_id: str) -> Set[str]:
         
     except Exception as e:
         logger.warning(f"⚠️ Could not scan file structure: {e}")
-        logger.info("   💡 Falling back to manifest-based deduplication...")
-        # Fall back to manifest method
-        return get_existing_tasks_from_manifest(repo_id)
-
-
-def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
-    """
-    Get existing task names from a manifest file in the HuggingFace repository.
-    This is the fallback method when file structure scanning fails.
-    
-    Args:
-        repo_id: HuggingFace repository ID (e.g., 'evaleval/every_eval_ever')
-        
-    Returns:
-        Set of existing task names from the manifest
-    """
-    existing_tasks = set()
-    
-    try:
-        # Try to download the manifest file
-        manifest_path = hf_hub_download(
-            repo_id=repo_id,
-            filename="data/helm/task_manifest.json",
-            repo_type="dataset",
-            local_files_only=False
-        )
-        
-        # Load the manifest
-        with open(manifest_path, 'r') as f:
-            manifest_data = json.load(f)
-        
-        # Extract task names from manifest
-        task_list = manifest_data.get('uploaded_tasks', [])
-        existing_tasks = set(task_list)
-        
-        logger.info(f"📋 Loaded {len(existing_tasks)} existing tasks from manifest (fast fallback)")
-        return existing_tasks
-        
-    except Exception as e:
-        logger.info(f"📄 No manifest found or error loading: {e}")
         logger.info("   💡 Falling back to dataset-based deduplication...")
-        # Fall back to the original method
+        # Fall back to dataset method
         return get_existing_tasks_from_hf_repo_legacy(repo_id)
+
+
 
 
 def get_existing_tasks_from_hf_repo(repo_id: str) -> Set[str]:
@@ -1188,97 +1072,6 @@ def get_existing_tasks_from_hf_repo(repo_id: str) -> Set[str]:
     """
     return get_existing_tasks_from_file_structure(repo_id)
 
-
-def update_task_manifest(repo_id: str, new_task_name: str):
-    """
-    Thread-safe manifest update by collecting tasks and deferring batch updates.
-    Each thread adds to a shared list, main thread updates manifest periodically.
-    
-    Args:
-        repo_id: HuggingFace repository ID
-        new_task_name: Name of the newly uploaded task
-    """
-    # For thread safety, we'll collect tasks and update in batches from main thread
-    # This function now just logs - actual update happens in batch at the end
-    logger.debug(f"📋 Task marked for manifest update: {new_task_name}")
-
-
-def update_task_manifest_batch(repo_id: str, completed_task_names: List[str]):
-    """
-    Update the task manifest file with multiple completed tasks at once.
-    This should be called from the main thread after parallel processing completes.
-    
-    Args:
-        repo_id: HuggingFace repository ID
-        completed_task_names: List of successfully uploaded task names
-    """
-    if not completed_task_names:
-        logger.info("📋 No new tasks to add to manifest")
-        return
-        
-    try:
-        api = HfApi()
-        
-        logger.info(f"📋 Updating manifest with {len(completed_task_names)} completed tasks...")
-        
-        # Try to download existing manifest
-        try:
-            manifest_path = hf_hub_download(
-                repo_id=repo_id,
-                filename="data/helm/task_manifest.json", 
-                repo_type="dataset",
-                local_files_only=False
-            )
-            
-            # Load existing manifest
-            with open(manifest_path, 'r') as f:
-                manifest_data = json.load(f)
-            logger.info(f"📋 Loaded existing manifest with {len(manifest_data.get('uploaded_tasks', []))} tasks")
-                
-        except Exception as e:
-            logger.info(f"📋 Creating new manifest (no existing manifest found): {e}")
-            # Create new manifest if none exists
-            manifest_data = {
-                "version": "1.0",
-                "description": "Manifest of uploaded HELM tasks for fast deduplication",
-                "created": datetime.now(timezone.utc).isoformat(),
-                "uploaded_tasks": []
-            }
-        
-        # Add new tasks (avoid duplicates using set operations)
-        existing_tasks = set(manifest_data.get('uploaded_tasks', []))
-        new_tasks = set(completed_task_names)
-        all_tasks = existing_tasks | new_tasks
-        actually_new_tasks = new_tasks - existing_tasks
-        
-        manifest_data['uploaded_tasks'] = sorted(list(all_tasks))  # Keep sorted for consistency
-        manifest_data['last_updated'] = datetime.now(timezone.utc).isoformat()
-        manifest_data['total_tasks'] = len(all_tasks)
-        
-        # Save updated manifest locally
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(manifest_data, f, indent=2)
-            temp_manifest_path = f.name
-        
-        # Upload updated manifest
-        api.upload_file(
-            path_or_fileobj=temp_manifest_path,
-            path_in_repo="data/helm/task_manifest.json",
-            repo_id=repo_id,
-            repo_type="dataset"
-        )
-        
-        # Clean up temp file
-        os.unlink(temp_manifest_path)
-        
-        logger.info(f"✅ Successfully updated manifest:")
-        logger.info(f"   � Added {len(actually_new_tasks)} new tasks")
-        logger.info(f"   📊 Total tasks in manifest: {len(all_tasks)}")
-        
-    except Exception as e:
-        # Don't fail the entire process if manifest update fails
-        logger.warning(f"⚠️ Could not update task manifest: {e}")
-        logger.warning(f"   📝 Tasks will still be uploaded, but deduplication may be slower on next run")
 
 
 def get_existing_tasks_from_hf_repo_legacy(repo_id: str) -> Set[str]:
@@ -1374,21 +1167,47 @@ def extract_task_from_evaluation_id(evaluation_id: str) -> Optional[str]:
     """
     Extract task identifier from evaluation_id for deduplication matching.
     
+    This function handles multiple evaluation_id formats:
+    1. Legacy format: "helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957"
+    2. Current filename format: "task_0001_commonsense_dataset=openbookqa,method=multiple_cho"
+    3. Direct task format: "math_subject=algebra,level=1,use_official_examples=False,use_chain_of_thought=True,model=AlephAlpha_luminous-base"
+    
     Args:
-        evaluation_id: Full evaluation ID like "helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957"
+        evaluation_id: Full evaluation ID in any of the supported formats
         
     Returns:
         Task identifier that can be matched against scraped task names
         Example: "commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended"
     """
     try:
-        # Pattern: helm_{benchmark}_{full_task_name}_id{instance1}_id{instance2}
-        # Example: helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957
-        # We want to extract: commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended
+        # Handle legacy helm_ format
+        if evaluation_id.startswith('helm_'):
+            # Pattern: helm_{benchmark}_{full_task_name}_id{instance1}_id{instance2}
+            # Example: helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957
+            # We want to extract: commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended
+            return _extract_task_from_legacy_helm_format(evaluation_id)
         
-        if not evaluation_id.startswith('helm_'):
-            return None
-            
+        # Handle current filename formats - just return as-is since they're already normalized
+        # Examples:
+        # - "task_0001_commonsense_dataset=openbookqa,method=multiple_cho"
+        # - "math_subject=algebra,level=1,use_official_examples=False,use_chain_of_thought=True,model=AlephAlpha_luminous-base"
+        return evaluation_id
+                
+    except Exception:
+        return None
+
+
+def _extract_task_from_legacy_helm_format(evaluation_id: str) -> Optional[str]:
+    """
+    Extract task from legacy helm_ format evaluation IDs.
+    
+    Args:
+        evaluation_id: Legacy format like "helm_commonsense_commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended_id4957_id4957"
+        
+    Returns:
+        Task identifier like "commonsense:dataset=openbookqa,method=multiple_choice_joint,model=AlephAlpha_luminous-extended"
+    """
+    try:
         # Remove 'helm_' prefix
         without_prefix = evaluation_id[5:]  # Remove 'helm_'
         
@@ -1601,8 +1420,13 @@ def main():
             # Production mode - streaming pipeline: scrape -> download in chunks -> process -> upload -> clean
             logger.info("🚀 Production mode: Streaming HELM evaluation pipeline")
             
-            # Step 1: Scrape HELM runs from website
-            logger.info("📋 Step 1: Scraping HELM evaluation runs from multiple benchmarks...")
+            # Step 0: Pre-load existing tasks for immediate deduplication feedback
+            logger.info("📋 Step 0: Loading existing tasks from repository for real-time deduplication...")
+            existing_tasks = get_existing_tasks_from_hf_repo(args.repo_id)
+            logger.info(f"✅ Loaded {len(existing_tasks)} existing task IDs from repository")
+            
+            # Step 1: Scrape HELM runs with immediate deduplication feedback
+            logger.info("📋 Step 1: Scraping HELM evaluation runs with real-time deduplication...")
             try:
                 # Import scraping functionality
                 sys.path.append(str(Path(__file__).parent.parent))
@@ -1613,8 +1437,11 @@ def main():
                 logger.info(f"🎯 Target benchmarks: {', '.join(helm_benchmarks)}")
                 
                 all_scraped_data = []
+                all_new_tasks = []
+                total_duplicates_found = 0
+                benchmark_map = {}  # Map task name to benchmark
                 
-                # Scrape from each benchmark
+                # Scrape from each benchmark with immediate deduplication feedback
                 for benchmark in helm_benchmarks:
                     logger.info(f"🔍 Scraping {benchmark} benchmark...")
                     try:
@@ -1627,10 +1454,61 @@ def main():
                         
                         if benchmark_data:
                             logger.info(f"   ✅ Scraped {len(benchmark_data)} runs from {benchmark}")
-                            # Add benchmark info to each run
+                            
+                            # Immediate deduplication analysis for this benchmark
+                            benchmark_tasks = []
+                            benchmark_new_tasks = []
+                            benchmark_duplicates = []
+                            
                             for run in benchmark_data:
-                                run['_source_benchmark'] = benchmark
+                                task_name = run.get('Run', '')
+                                if task_name:
+                                    run['_source_benchmark'] = benchmark
+                                    benchmark_tasks.append(task_name)
+                                    benchmark_map[task_name] = benchmark
+                                    
+                                    # Check if this task already exists
+                                    if check_task_exists_efficient(task_name, existing_tasks):
+                                        benchmark_duplicates.append(task_name)
+                                    else:
+                                        benchmark_new_tasks.append(task_name)
+                            
+                            # Report immediate deduplication results for this benchmark
+                            logger.info(f"   📊 Deduplication analysis for {benchmark}:")
+                            logger.info(f"      🆕 New tasks: {len(benchmark_new_tasks)}")
+                            logger.info(f"      🔄 Duplicates (skipped): {len(benchmark_duplicates)}")
+                            
+                            # Show sample new tasks
+                            if benchmark_new_tasks and len(benchmark_new_tasks) <= 5:
+                                logger.info(f"      📝 New tasks to process:")
+                                for new_task in benchmark_new_tasks:
+                                    logger.info(f"         ✓ {new_task}")
+                            elif len(benchmark_new_tasks) > 5:
+                                logger.info(f"      📝 Sample new tasks (first 5):")
+                                for new_task in benchmark_new_tasks[:5]:
+                                    logger.info(f"         ✓ {new_task}")
+                                logger.info(f"         ... and {len(benchmark_new_tasks) - 5} more new tasks")
+                            
+                            # Show sample duplicates
+                            if benchmark_duplicates and len(benchmark_duplicates) <= 5:
+                                logger.info(f"      � Duplicate tasks (skipped):")
+                                for dup in benchmark_duplicates:
+                                    normalized = normalize_task_name_for_deduplication(dup)
+                                    logger.info(f"         ⏭ {dup}")
+                                    logger.info(f"            → matches: {normalized}")
+                            elif len(benchmark_duplicates) > 5:
+                                logger.info(f"      📋 Sample duplicates (first 3):")
+                                for dup in benchmark_duplicates[:3]:
+                                    normalized = normalize_task_name_for_deduplication(dup)
+                                    logger.info(f"         ⏭ {dup}")
+                                    logger.info(f"            → matches: {normalized}")
+                                logger.info(f"         ... and {len(benchmark_duplicates) - 3} more duplicates")
+                            
+                            # Add to global collections
                             all_scraped_data.extend(benchmark_data)
+                            all_new_tasks.extend(benchmark_new_tasks)
+                            total_duplicates_found += len(benchmark_duplicates)
+                            
                         else:
                             logger.warning(f"   ⚠️ No data scraped from {benchmark}")
                             
@@ -1639,48 +1517,14 @@ def main():
                         continue
                 
                 if all_scraped_data:
-                    logger.info(f"✅ Total scraped: {len(all_scraped_data)} runs across all benchmarks")
+                    logger.info(f"🎯 Final scraping and deduplication summary:")
+                    logger.info(f"   📊 Total scraped: {len(all_scraped_data)} runs across all benchmarks")
+                    logger.info(f"   🆕 New tasks to process: {len(all_new_tasks)}")
+                    logger.info(f"   🔄 Duplicates skipped: {total_duplicates_found}")
+                    logger.info(f"   📈 Deduplication efficiency: {total_duplicates_found/(len(all_scraped_data)) * 100:.1f}% duplicates avoided")
                     
-                    # Use all scraped tasks from all benchmarks
-                    task_names = []
-                    benchmark_map = {}  # Map task name to benchmark
-                    
-                    for run in all_scraped_data:
-                        task_name = run.get('Run', '')
-                        if task_name:
-                            task_names.append(task_name)
-                            benchmark_map[task_name] = run.get('_source_benchmark', 'lite')
-                    
-                    task_names = [name for name in task_names if name]  # Remove empty
-                    
-                    # STEP: Deduplication - Remove tasks that already exist in HF repository
-                    logger.info(f"📊 Initial scraped tasks: {len(task_names)}")
-                    
-                    # Get existing task names directly from HF repository
-                    existing_tasks = get_existing_tasks_from_hf_repo(args.repo_id)
-                    
-                    if existing_tasks:
-                        logger.info(f"✅ Found {len(existing_tasks)} existing tasks in HF repository")
-                        
-                        # Convert scraped task names to set for efficient set operations
-                        scraped_tasks_set = set(task_names)
-                        
-                        # Find new tasks using set difference (much faster!)
-                        new_tasks_set = scraped_tasks_set - existing_tasks
-                        skipped_tasks_set = scraped_tasks_set & existing_tasks
-                        
-                        # Convert back to list maintaining original order for processing
-                        task_names = [task for task in task_names if task in new_tasks_set]
-                        
-                        logger.info(f"⏭️ Skipping {len(skipped_tasks_set)} tasks that already exist in repository")
-                        logger.info(f"📝 Will process {len(task_names)} new tasks")
-                        
-                        if skipped_tasks_set and len(skipped_tasks_set) <= 10:
-                            logger.info(f"📋 Skipped tasks: {', '.join(list(skipped_tasks_set)[:10])}")
-                        elif len(skipped_tasks_set) > 10:
-                            logger.info(f"📋 Skipped tasks (first 10): {', '.join(list(skipped_tasks_set)[:10])}...")
-                    else:
-                        logger.info(f"📝 No existing tasks found - will process all {len(task_names)} tasks")
+                    # Use only the new tasks for processing
+                    task_names = all_new_tasks
                     
                     logger.info(f"📝 Prepared {len(task_names)} tasks for streaming processing")
                 else:
@@ -1858,9 +1702,6 @@ def main():
                                         upload_success = True
                                         logger.info(f"✅ Thread-{thread_id}: Uploaded to {repo_path} (attempt {attempt + 1})")
                                         
-                                        # Queue manifest update immediately (thread-safe)
-                                        queue_manifest_update(task_name)
-                                        
                                         break
                                     
                                 except Exception as e:
@@ -1923,10 +1764,6 @@ def main():
                 logger.info(f"🚀 Starting parallel processing with {args.max_workers} threads")
                 logger.info(f"📊 Total tasks to process: {len(task_list)}")
                 
-                # Start manifest update worker for immediate updates
-                if not args.local_only:
-                    start_manifest_worker(args.repo_id)
-                
                 # Note: No local checkpoint needed! HF repository deduplication handles resume automatically
                 # Even if runner restarts, get_existing_tasks_from_hf_repo() ensures we skip already uploaded tasks
                 
@@ -1963,11 +1800,6 @@ def main():
                             failed_count += 1
                             failed_tasks.append(task_name)
                             logger.error(f"❌ Task {task_index} ({task_name}) failed with exception: {e}")
-                
-                # Stop manifest worker and wait for any pending updates
-                if not args.local_only:
-                    logger.info("📋 Waiting for manifest updates to complete...")
-                    stop_manifest_worker()
                 
                 logger.info(f"🎉 Individual task streaming completed!")
                 logger.info(f"   📊 Total processed: {total_processed} evaluations")
