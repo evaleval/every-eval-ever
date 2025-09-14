@@ -503,7 +503,7 @@ def _create_evaluation_result_from_helm(helm_data: dict, task_id: str, source: s
                     temperature=float(helm_data.get('temperature', -1.0)) if helm_data.get('temperature') is not None else -1.0,
                     top_p=-1.0,  # Use -1.0 sentinel instead of None
                     top_k=-1.0,  # Use -1.0 sentinel instead of None
-                    max_tokens=helm_data.get('max_tokens') if helm_data.get('max_tokens') is not None else 1,
+                    max_tokens=max(1, helm_data.get('max_tokens', 1)) if helm_data.get('max_tokens') is not None else 1,
                     stop_sequences=helm_data.get('stop_sequences', [])
                 )
             )
@@ -685,7 +685,7 @@ def _create_evaluation_result(row: pd.Series, task_id: str, benchmark: str, sour
                     temperature=float(row.get('temperature', -1.0)) if pd.notna(row.get('temperature')) else -1.0,
                     top_p=float(row.get('top_p', -1.0)) if pd.notna(row.get('top_p')) else -1.0,
                     top_k=float(row.get('top_k', -1.0)) if pd.notna(row.get('top_k')) else -1.0,
-                    max_tokens=_safe_int_convert(row.get('max_tokens'), 1) if pd.notna(row.get('max_tokens')) else 1,
+                    max_tokens=max(1, _safe_int_convert(row.get('max_tokens'), 1)) if pd.notna(row.get('max_tokens')) else 1,
                     stop_sequences=[]
                 )
             )
