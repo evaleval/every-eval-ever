@@ -16,31 +16,32 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import os
+import pandas as pd
+import queue
+import re
 import shutil
 import sys
+import tempfile
+import threading
 import time
 import warnings
-import threading
-import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import Queue
 from typing import List, Set, Dict, Optional
-import logging
-import pandas as pd
-from huggingface_hub import HfApi
-from datasets import Dataset
-from datasets import Dataset
+
+# Third-party imports
+from huggingface_hub import HfApi, hf_hub_download
+from datasets import Dataset, load_dataset
 
 # Suppress Pydantic protected namespace warnings
 warnings.filterwarnings("ignore", message=".*protected namespace.*", category=UserWarning)
 
-from huggingface_hub import HfApi
-
 # Try to import datasets library for reading existing data
 try:
-    from datasets import load_dataset, Dataset
     DATASETS_AVAILABLE = True
 except ImportError:
     DATASETS_AVAILABLE = False
@@ -389,7 +390,6 @@ def _extract_numeric_id(instance_id) -> int:
     instance_id_str = str(instance_id)
     
     # Extract numbers from string like 'id5138' using regex first
-    import re
     numbers = re.findall(r'\d+', instance_id_str)
     if numbers:
         return int(numbers[0])  # Return first number found
@@ -407,7 +407,6 @@ def _safe_int_convert(value, default=0):
         return int(value)
     except (ValueError, TypeError):
         # Try to extract numbers from string
-        import re
         value_str = str(value)
         numbers = re.findall(r'\d+', value_str)
         if numbers:
@@ -1049,8 +1048,6 @@ def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
     existing_tasks = set()
     
     try:
-        from huggingface_hub import hf_hub_download
-        
         # Try to download the manifest file
         manifest_path = hf_hub_download(
             repo_id=repo_id,
@@ -1060,7 +1057,6 @@ def get_existing_tasks_from_manifest(repo_id: str) -> Set[str]:
         )
         
         # Load the manifest
-        import json
         with open(manifest_path, 'r') as f:
             manifest_data = json.load(f)
         
@@ -1115,14 +1111,12 @@ def update_task_manifest_batch(repo_id: str, completed_task_names: List[str]):
         return
         
     try:
-        from huggingface_hub import HfApi
         api = HfApi()
         
         logger.info(f"📋 Updating manifest with {len(completed_task_names)} completed tasks...")
         
         # Try to download existing manifest
         try:
-            from huggingface_hub import hf_hub_download
             manifest_path = hf_hub_download(
                 repo_id=repo_id,
                 filename="data/helm/task_manifest.json", 
@@ -1131,7 +1125,6 @@ def update_task_manifest_batch(repo_id: str, completed_task_names: List[str]):
             )
             
             # Load existing manifest
-            import json
             with open(manifest_path, 'r') as f:
                 manifest_data = json.load(f)
             logger.info(f"📋 Loaded existing manifest with {len(manifest_data.get('uploaded_tasks', []))} tasks")
@@ -1157,7 +1150,6 @@ def update_task_manifest_batch(repo_id: str, completed_task_names: List[str]):
         manifest_data['total_tasks'] = len(all_tasks)
         
         # Save updated manifest locally
-        import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             json.dump(manifest_data, f, indent=2)
             temp_manifest_path = f.name
@@ -1171,7 +1163,6 @@ def update_task_manifest_batch(repo_id: str, completed_task_names: List[str]):
         )
         
         # Clean up temp file
-        import os
         os.unlink(temp_manifest_path)
         
         logger.info(f"✅ Successfully updated manifest:")
@@ -1605,11 +1596,6 @@ def main():
                 if not args.test_run and not args.local_only:
                     api = setup_hf_api(os.environ.get('HF_TOKEN'), args.repo_id)
                 
-                # Import threading for parallel processing
-                import threading
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                from queue import Queue
-                
                 # Thread-safe counters
                 total_processed = 0
                 total_uploaded = 0
@@ -1727,7 +1713,6 @@ def main():
                                     
                                     # Step 3: Verify upload by checking file exists and has content
                                     try:
-                                        from huggingface_hub import hf_hub_download
                                         downloaded_path = hf_hub_download(
                                             repo_id=args.repo_id,
                                             filename=repo_path,
@@ -1736,7 +1721,6 @@ def main():
                                         )
                                         
                                         # Verify the downloaded file has reasonable size
-                                        import os
                                         if os.path.getsize(downloaded_path) < 100:  # Minimum reasonable size
                                             raise ValueError(f"Uploaded file appears incomplete (size: {os.path.getsize(downloaded_path)} bytes)")
                                         
@@ -1774,7 +1758,6 @@ def main():
                             try:
                                 # Always remove download directory to save space
                                 if helm_dir.exists():
-                                    import shutil
                                     shutil.rmtree(helm_dir)
                                 
                                 # Only remove local file if upload was successful OR in local-only mode
