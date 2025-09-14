@@ -48,7 +48,7 @@ jobs:
           echo "🚀 SIMPLIFIED PROCESSING MODE - EvalHub Schema"
           echo "📦 Individual JSON files per evaluation"
           echo "📁 Nested folder structure: source/benchmark/subject"
-          echo "⚡ STREAMING MODE: 2 parallel workers, 20 tasks/chunk (memory optimized)"
+          echo "⚡ STREAMING MODE: 4 parallel workers, 20 tasks/chunk (memory optimized)"
           echo "🎯 Target: EvalHub-compliant individual evaluation files"
           echo "🌍 Full HELM dataset (all pages) with streaming upload"
           echo "🌊 Process -> Upload -> Clean cycle for memory efficiency"
@@ -60,7 +60,7 @@ jobs:
           if python scripts/helm_processor.py \
             --repo-id "${HF_REPO_ID}" \
             --chunk-size 20 \
-            --max-workers 2 \
+            --max-workers 4 \
             --source-name helm \
             --helm-benchmarks lite classic mmlu; then
             echo ""
